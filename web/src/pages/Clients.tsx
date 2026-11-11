@@ -82,9 +82,9 @@ export function ClientsPage({
   }, [selectedId]);
 
   const title =
-    user.role === "director"
+    user.role === "director" || user.role === "analyst"
       ? "Клиенты компании"
-      : user.role === "manager"
+      : user.role === "head"
         ? "Клиенты отдела"
         : "Мои клиенты";
 

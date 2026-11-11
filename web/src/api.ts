@@ -1,11 +1,23 @@
 import type {
   AgentPayload,
+  AnalystPayload,
   AuditRow,
   Client,
   Conversation,
   ConversationDetail,
   Dashboard,
+  Decision,
+  FinancePayload,
+  HrPayload,
   Message,
+  PickupItem,
+  ProductionPayload,
+  PulsePayload,
+  RuleItem,
+  RuleTestResult,
+  SalesPayload,
+  TemplateItem,
+  TopicRow,
   User,
 } from "./types";
 
@@ -99,5 +111,40 @@ export const api = {
     auto_channels?: string[];
   }) => request<AgentPayload>("/agent", { method: "PATCH", body: JSON.stringify(data) }),
   audit: () => request<{ items: AuditRow[] }>("/audit"),
+  users: () => request<{ items: { id: number; name: string; role: string; team: string; title: string }[] }>("/users"),
   resetDemo: () => request<{ ok: boolean }>("/demo/reset", { method: "POST" }),
+  pulse: () => request<PulsePayload>("/pulse"),
+  sales: () => request<SalesPayload>("/sales"),
+  production: () => request<ProductionPayload>("/production"),
+  causeOrders: (cause: string) =>
+    request<{ cause: string; items: (import("./types").Order & { client_name: string; owner_name: string })[] }>(
+      `/production/causes/${cause}/orders`,
+    ),
+  finance: () => request<FinancePayload>("/finance"),
+  hr: () => request<HrPayload>("/hr"),
+  analyst: () => request<AnalystPayload>("/analyst"),
+  decisions: (filters: { status?: string; priority?: string } = {}) =>
+    request<{ items: Decision[] }>(`/decisions${query(filters)}`),
+  createDecision: (data: {
+    kpi_key?: string;
+    problem: string;
+    impact?: string;
+    cause?: string;
+    action: string;
+    owner_id?: number | null;
+    due_at?: string | null;
+    priority?: string;
+  }) => request<{ id: number }>("/decisions", { method: "POST", body: JSON.stringify(data) }),
+  patchDecision: (id: number, data: { status?: string; action?: string; result_note?: string }) =>
+    request<Decision>(`/decisions/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  rules: () => request<{ items: RuleItem[]; topics: TopicRow[] }>("/rules"),
+  patchRule: (key: string, data: { config: Record<string, unknown>; enabled?: boolean }) =>
+    request<{ ok: boolean }>(`/rules/${key}`, { method: "PATCH", body: JSON.stringify(data) }),
+  testRule: (key: string, config: Record<string, unknown>) =>
+    request<RuleTestResult>("/rules/test", { method: "POST", body: JSON.stringify({ key, config }) }),
+  templates: (topic?: string) =>
+    request<{ items: TemplateItem[] }>(`/templates${query({ topic })}`),
+  pickups: () => request<{ items: PickupItem[] }>("/pickups"),
+  remindPickup: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/pickups/${id}/remind`, { method: "POST" }),
 };

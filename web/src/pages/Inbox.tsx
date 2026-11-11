@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { Conversation, ConversationDetail, User } from "../types";
+import type { Conversation, ConversationDetail, TemplateItem, User } from "../types";
 import {
   Avatar,
   ChannelBadge,
@@ -66,7 +66,18 @@ export function InboxPage({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [newLeadOpen, setNewLeadOpen] = useState(false);
+  const [allTemplates, setAllTemplates] = useState<TemplateItem[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    api.templates().then((r) => setAllTemplates(r.items)).catch(() => setAllTemplates([]));
+  }, []);
+
+  const chatTemplates = (() => {
+    const topic = detail?.conversation.topic;
+    const matched = topic ? allTemplates.filter((t) => t.topic === topic) : [];
+    return matched.length > 0 ? matched : allTemplates.slice(0, 4);
+  })();
 
   const loadList = () => {
     setLoading(true);
@@ -259,6 +270,14 @@ export function InboxPage({
                   <ChannelBadge channel={conversation.channel} />
                   <ModeBadge mode={conversation.mode} />
                   <ConversationStatus status={conversation.status} />
+                  {conversation.sla_due_at && conversation.status !== "closed" && (
+                    <span
+                      className={`sla-chip ${new Date(conversation.sla_due_at).getTime() < Date.now() ? "sla-late" : ""}`}
+                      title="Ответ по SLA темы"
+                    >
+                      SLA {formatMinutes(Math.round((new Date(conversation.sla_due_at).getTime() - Date.now()) / 60000))}
+                    </span>
+                  )}
                   {conversation.mode === "magi" && (
                     <button className="btn btn-small" onClick={handoff}>
                       <IconUser size={14} /> Передать человеку
@@ -275,6 +294,16 @@ export function InboxPage({
                     <span>{conversation.handoff_reason || "Нужна помощь менеджера"}</span>
                   </div>
                   <button className="link-btn" onClick={resume}>Вернуть Magi</button>
+                </div>
+              )}
+
+              {conversation.summary && conversation.mode === "human" && (
+                <div className="summary-banner">
+                  <IconSpark size={15} />
+                  <div>
+                    <strong>AI-сводка для менеджера</strong>
+                    <pre>{conversation.summary}</pre>
+                  </div>
                 </div>
               )}
 
@@ -304,6 +333,29 @@ export function InboxPage({
               </div>
 
               <div className="composer">
+                {!asLead && chatTemplates.length > 0 && (
+                  <div className="template-chips">
+                    {chatTemplates.map((t) => (
+                      <button
+                        key={t.id}
+                        className="template-chip"
+                        title={t.body}
+                        onClick={() => {
+                          const firstName = (detail.client.name ?? "").split(" ")[0];
+                          const last = detail.orders[0];
+                          const filled = t.body
+                            .replaceAll("{name}", firstName)
+                            .replaceAll("{product}", last?.product ?? "заказ")
+                            .replaceAll("{order_status}", last ? ({ new: "принят", moderation: "на модерации", in_production: "в производстве", ready: "готов", delivered: "доставлен" } as Record<string, string>)[last.status] ?? last.status : "в работе")
+                            .replaceAll("{promised}", last?.promised_at ? new Date(last.promised_at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) : "скоро");
+                          setComposer(filled);
+                        }}
+                      >
+                        {t.title}
+                      </button>
+                    ))}
+                  </div>
+                )}
                 <label className="lead-toggle">
                   <input
                     type="checkbox"

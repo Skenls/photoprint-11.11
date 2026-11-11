@@ -312,6 +312,38 @@ export function Spinner({ label = "Загружаем…" }: { label?: string })
   );
 }
 
+export function MiniBars({
+  items,
+  tone = "green",
+  format,
+}: {
+  items: { label: string; value: number; tone?: "green" | "red" | "amber" | "blue" }[];
+  tone?: "green" | "red" | "amber" | "blue";
+  format?: (value: number) => string;
+}) {
+  const max = Math.max(1, ...items.map((i) => i.value));
+  return (
+    <div className="mini-bars">
+      {items.map((item) => (
+        <div className="mini-bar-row" key={item.label}>
+          <span className="mini-bar-label">{item.label}</span>
+          <div className="mini-bar-track">
+            <span
+              className={`mini-bar-fill t-${item.tone ?? tone}`}
+              style={{ width: `${(item.value / max) * 100}%` }}
+            />
+          </div>
+          <span className="mini-bar-value">{format ? format(item.value) : item.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export function KpiStatusDot({ status }: { status: string }) {
+  return <span className={`kpi-dot kpi-dot-${status}`} aria-hidden="true" />;
+}
+
 export function ErrorNote({ text }: { text: string }) {
   return (
     <div className="error-note" role="alert">

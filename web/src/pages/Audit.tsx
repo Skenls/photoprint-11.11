@@ -12,6 +12,10 @@ const ACTIONS: Record<string, string> = {
   "conversation.resume_magi": "Возврат к Magi",
   "lead.created": "Новый лид",
   "demo.reset": "Сброс демо",
+  "decision.create": "Создано решение",
+  "decision.update": "Решение обновлено",
+  "rules.update": "Правило Magi изменено",
+  "pickup.remind": "Напоминание о ПВЗ",
 };
 
 const ENTITIES: Record<string, string> = {

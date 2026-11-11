@@ -16,30 +16,66 @@ import { InboxPage as Inbox } from "./pages/Inbox";
 import { ClientsPage as Clients } from "./pages/Clients";
 import { Magi } from "./pages/Magi";
 import { Audit } from "./pages/Audit";
+import { Pulse } from "./pages/Pulse";
+import { Production } from "./pages/Production";
+import { Finance } from "./pages/Finance";
+import { Hr } from "./pages/Hr";
+import { AnalystPage } from "./pages/AnalystPage";
+import { Decisions } from "./pages/Decisions";
+import { Rules } from "./pages/Rules";
 
-type Page = "dashboard" | "inbox" | "clients" | "magi" | "audit";
+type Page =
+  | "dashboard" | "pulse" | "inbox" | "clients" | "magi" | "audit"
+  | "production" | "finance" | "hr" | "analyst" | "decisions" | "rules";
 
-const NAV: { page: Page; label: string; icon: typeof IconChart; roles?: string[] }[] = [
-  { page: "dashboard", label: "Обзор", icon: IconChart },
-  { page: "inbox", label: "Инбокс", icon: IconInbox },
-  { page: "clients", label: "Клиенты", icon: IconUsers },
-  { page: "magi", label: "Magi", icon: IconSpark },
-  { page: "audit", label: "Журнал", icon: IconShield, roles: ["director"] },
+interface NavItem {
+  page: Page;
+  label: string;
+  icon: typeof IconChart;
+  show: (user: User) => boolean;
+}
+
+const isDirector = (u: User) => u.role === "director";
+const isAnalyst = (u: User) => u.role === "analyst";
+const isManagement = (u: User) => u.role !== "operator";
+const headOf = (team: string) => (u: User) => u.role === "head" && u.team === team;
+const operatorOr = (fn: (u: User) => boolean) => (u: User) => u.role === "operator" || fn(u);
+
+const NAV: NavItem[] = [
+  { page: "pulse", label: "Пульс", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) },
+  { page: "dashboard", label: "Обзор", icon: IconChart, show: operatorOr((u) => u.role === "head" && u.team === "Клиентский сервис") },
+  { page: "inbox", label: "Инбокс", icon: IconInbox, show: (u) => isDirector(u) || u.team === "Клиентский сервис" },
+  { page: "clients", label: "Клиенты", icon: IconUsers, show: (u) => isDirector(u) || u.team === "Клиентский сервис" },
+  { page: "magi", label: "Magi", icon: IconSpark, show: (u) => isDirector(u) || u.team === "Клиентский сервис" },
+  { page: "rules", label: "Конструктор", icon: IconSpark, show: (u) => isDirector(u) || (u.role === "head" && u.team === "Клиентский сервис") },
+  { page: "production", label: "Производство", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Производство")(u) },
+  { page: "finance", label: "Финансы", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Финансы и люди")(u) },
+  { page: "hr", label: "Люди", icon: IconUsers, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Финансы и люди")(u) },
+  { page: "decisions", label: "Решения", icon: IconShield, show: isManagement },
+  { page: "analyst", label: "Аналитика", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) },
+  { page: "audit", label: "Журнал", icon: IconShield, show: isDirector },
 ];
 
 const TITLES: Record<Page, string> = {
-  dashboard: "Обзор",
+  dashboard: "Обзор отдела",
+  pulse: "Пульс компании",
   inbox: "Инбокс",
   clients: "Клиенты",
   magi: "Magi",
   audit: "Журнал действий",
+  production: "Производство и качество",
+  finance: "Финансы (1С)",
+  hr: "Люди (HR)",
+  analyst: "Аналитика источников",
+  decisions: "Реестр решений",
+  rules: "Magi Конструктор правил",
 };
 
 function parseHash(): { page: Page; param: string } {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [page, param = ""] = raw.split("/");
-  const known = ["dashboard", "inbox", "clients", "magi", "audit"];
-  return { page: (known.includes(page) ? page : "dashboard") as Page, param };
+  const known: Page[] = ["dashboard", "pulse", "inbox", "clients", "magi", "audit", "production", "finance", "hr", "analyst", "decisions", "rules"];
+  return { page: (known.includes(page as Page) ? page : "dashboard") as Page, param };
 }
 
 function go(path: string) {
@@ -83,19 +119,20 @@ export default function App() {
       <Login
         onLogin={(next) => {
           setUser(next);
-          go("dashboard");
+          go(next.role === "director" ? "pulse" : "dashboard");
         }}
       />
     );
   }
 
-  const page = route.page === "audit" && user.role !== "director" ? "dashboard" : route.page;
-  const nav = NAV.filter((item) => !item.roles || item.roles.includes(user.role));
+  const nav = NAV.filter((item) => item.show(user));
+  const fallback: Page = user.role === "director" ? "pulse" : nav[0]?.page ?? "dashboard";
+  const page: Page = nav.some((n) => n.page === route.page) ? route.page : fallback;
 
   const logout = async () => {
     await api.logout();
     setUser(null);
-    go("dashboard");
+    go("pulse");
   };
 
   return (
@@ -107,7 +144,7 @@ export default function App() {
           </div>
           <div>
             <div className="brand-name">Magi</div>
-            <div className="brand-sub">CRM клиентского сервиса</div>
+            <div className="brand-sub">Единая система управления</div>
           </div>
         </div>
 
@@ -132,7 +169,7 @@ export default function App() {
 
         <div className="sidebar-foot">
           <div className="demo-card">
-            <span className="status-dot ok" />
+            <span className="status-dot" />
             <div>
               <strong>Демо-стенд</strong>
               <span>Space Hackathon 2026</span>
@@ -152,9 +189,9 @@ export default function App() {
 
           <div className="topbar-right">
             <span className="scope-chip">
-              {user.role === "director"
+              {user.role === "director" || user.role === "analyst"
                 ? "Вся компания"
-                : user.role === "manager"
+                : user.role === "head"
                   ? user.team
                   : "Только мои"}
             </span>
@@ -172,6 +209,12 @@ export default function App() {
         </header>
 
         <main className="content">
+          {page === "pulse" && (
+            <Pulse
+              user={user}
+              onNavigate={(target) => go(target === "production" || target === "finance" ? target : target)}
+            />
+          )}
           {page === "dashboard" && (
             <Dashboard
               user={user}
@@ -183,17 +226,25 @@ export default function App() {
             <Inbox
               user={user}
               initialId={route.param}
-              onOpenClient={(id) => go(`clients/${id}`)}
+              onOpenClient={(id: number) => go(`clients/${id}`)}
             />
           )}
           {page === "clients" && (
             <Clients
               user={user}
               initialId={route.param}
-              onOpenInbox={(id) => go(`inbox/${id}`)}
+              onOpenInbox={(id: number) => go(`inbox/${id}`)}
             />
           )}
           {page === "magi" && <Magi user={user} />}
+          {page === "rules" && (
+            <Rules canEdit={user.role === "director" || (user.role === "head" && user.team === "Клиентский сервис")} />
+          )}
+          {page === "production" && <Production />}
+          {page === "finance" && <Finance />}
+          {page === "hr" && <Hr />}
+          {page === "analyst" && <AnalystPage />}
+          {page === "decisions" && <Decisions user={user} />}
           {page === "audit" && <Audit />}
         </main>
       </div>

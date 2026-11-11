@@ -9,19 +9,37 @@ const DEMO_USERS: Array<{ role: Role; email: string; name: string; description: 
     role: "director",
     email: "director@magi.by",
     name: "Ирина Соколова",
-    description: "Вся компания: выручка, отделы, качество Magi",
+    description: "Пульс компании: KPI, решения, все отделы",
   },
   {
-    role: "manager",
-    email: "manager@magi.by",
+    role: "head",
+    email: "head.crm@magi.by",
     name: "Анна Петрова",
-    description: "Только клиентский сервис: очередь и команда",
+    description: "Клиентский сервис: инбокс, Magi, конструктор правил",
   },
   {
     role: "operator",
-    email: "operator@magi.by",
+    email: "manager@magi.by",
     name: "Игорь Лебедев",
-    description: "Только свои диалоги и клиенты",
+    description: "Менеджер: только свои диалоги и клиенты",
+  },
+  {
+    role: "head",
+    email: "head.production@magi.by",
+    name: "Дмитрий Круглов",
+    description: "Производство: станки, очереди, причины просрочки",
+  },
+  {
+    role: "head",
+    email: "head.finance@magi.by",
+    name: "Ольга Миронова",
+    description: "Финансы и люди: 1С, БДР/БДДС, штат, вакансии",
+  },
+  {
+    role: "analyst",
+    email: "analyst@magi.by",
+    name: "Марина Зайцева",
+    description: "Аналитик: свежесть источников, сверки, качество данных",
   },
 ];
 

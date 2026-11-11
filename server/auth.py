@@ -12,6 +12,7 @@ from .db import get_db
 
 COOKIE_NAME = "magi_session"
 SESSION_TTL = 8 * 3600
+READ_ALL_ROLES = {"director", "analyst"}
 
 
 def _secret() -> str:
@@ -81,10 +82,23 @@ def require_roles(*roles: str):
     return check
 
 
+def require_teams(*teams: str):
+    """Роль+команда: директор и аналитик всегда допущены; руководитель — только своя команда."""
+    async def check(request: Request) -> dict:
+        user = await current_user(request)
+        if user["role"] in READ_ALL_ROLES:
+            return user
+        if user["role"] == "head" and user["team"] in teams:
+            return user
+        raise HTTPException(status_code=403, detail="Раздел закрыт для вашего подразделения")
+
+    return check
+
+
 def client_scope(user: dict, alias: str = "c") -> tuple[str, list]:
-    if user["role"] == "director":
+    if user["role"] in READ_ALL_ROLES:
         return "1=1", []
-    if user["role"] == "manager":
+    if user["role"] == "head":
         return f"{alias}.team = ?", [user["team"]]
     return (
         f"({alias}.owner_id = ? OR {alias}.id IN "
@@ -94,19 +108,32 @@ def client_scope(user: dict, alias: str = "c") -> tuple[str, list]:
 
 
 def conversation_scope(user: dict, alias: str = "cv") -> tuple[str, list]:
-    if user["role"] == "director":
+    if user["role"] in READ_ALL_ROLES:
         return "1=1", []
-    if user["role"] == "manager":
+    if user["role"] == "head":
         return f"{alias}.team = ?", [user["team"]]
     return f"{alias}.assignee_id = ?", [user["id"]]
 
 
 def can_access_conversation(user: dict, conversation: dict) -> bool:
-    if user["role"] == "director":
+    if user["role"] in READ_ALL_ROLES:
         return True
-    if user["role"] == "manager":
+    if user["role"] == "head":
         return conversation["team"] == user["team"]
     return conversation["assignee_id"] == user["id"]
+
+
+def require_client_service():
+    """Клиентский сервис: директор/аналитик всегда; руководитель и оператор — только своего отдела."""
+    async def check(request: Request) -> dict:
+        user = await current_user(request)
+        if user["role"] in READ_ALL_ROLES:
+            return user
+        if user["role"] in ("head", "operator") and user["team"] == "Клиентский сервис":
+            return user
+        raise HTTPException(status_code=403, detail="Раздел закрыт для вашего подразделения")
+
+    return check
 
 
 def log_audit(conn, user: dict | None, action: str, entity: str, entity_id=None, detail: str | None = None) -> None:

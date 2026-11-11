@@ -247,6 +247,13 @@ export function Magi({ user }: { user: User }) {
               ? "Чтобы включить модель, задайте MAGI_BASE_URL, MAGI_API_KEY и MAGI_MODEL. При ошибке API Magi вернётся к локальным правилам."
               : "Ключ хранится только в переменных окружения. В репозиторий он не попадает."}
           </p>
+          <p className="muted-note">
+            Персональные данные перед отправкой в модель маскируются: телефоны, почта и инициалы вместо ФИО.
+            Пример: <code>{data.pii_mask_example.name} · {data.pii_mask_example.phone} · {data.pii_mask_example.email}</code>
+          </p>
+          <p className="muted-note">
+            Правила Magi меняются вживую в <a href="#rules">Конструкторе правил</a> — без разработчиков и релизов.
+          </p>
         </Card>
       </div>
 
