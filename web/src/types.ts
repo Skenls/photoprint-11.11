@@ -276,6 +276,7 @@ export interface ProductionPayload {
   machines: Machine[];
   queue: MachineJob[];
   causes: { cause: string; label: string; count: number; share: number }[];
+  weeks: { week: string; start: string; load: number }[];
   defect_rate: number;
 }
 

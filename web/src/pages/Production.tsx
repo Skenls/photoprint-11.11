@@ -129,16 +129,29 @@ export function Production() {
         </Card>
       </div>
 
-      <Card title="План / факт выпуска" subtitle="14 дней: принято и выпущено">
-        <MiniBars
-          items={data.plan_fact.map((d) => ({
-            label: d.day.slice(8, 10) + "." + d.day.slice(5, 7),
-            value: d.planned,
-            tone: d.done >= d.planned * 0.9 ? "green" : "amber",
-          }))}
-          format={(v) => `${v}`}
-        />
-      </Card>
+      <div className="grid grid-2">
+        <Card title="Нагрузка / мощность" subtitle="План станков на 6 недель">
+          <MiniBars
+            items={data.weeks.map((w) => ({
+              label: `${w.week} · ${w.start}`,
+              value: w.load,
+              tone: w.load > 100 ? "red" : w.load >= 95 ? "amber" : "green",
+            }))}
+            format={(v) => `${v}%`}
+          />
+        </Card>
+
+        <Card title="План / факт выпуска" subtitle="14 дней: принято и выпущено">
+          <MiniBars
+            items={data.plan_fact.map((d) => ({
+              label: d.day.slice(8, 10) + "." + d.day.slice(5, 7),
+              value: d.planned,
+              tone: d.done >= d.planned * 0.9 ? "green" : "amber",
+            }))}
+            format={(v) => `${v}`}
+          />
+        </Card>
+      </div>
     </div>
   );
 }

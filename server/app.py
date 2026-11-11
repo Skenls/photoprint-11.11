@@ -998,12 +998,27 @@ def production(user: dict = Depends(require_teams("Производство"))):
             c["share"] = round(c["count"] / total_cause * 100)
         defect_orders = conn.execute("SELECT COUNT(*) FROM orders WHERE defect = 1").fetchone()[0]
         total_orders = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+
+        monday = (_now() - timedelta(days=_now().weekday())).replace(hour=0, minute=0, second=0)
+        weekly_capacity = conn.execute("SELECT SUM(capacity_min_per_day) * 5 FROM machines").fetchone()[0]
+        weeks = []
+        for i in range(6):
+            wstart = monday + timedelta(days=7 * i)
+            planned = conn.execute(
+                "SELECT COALESCE(SUM(est_minutes), 0) FROM machine_jobs WHERE planned_start >= ? AND planned_start < ?",
+                (_iso(wstart), _iso(wstart + timedelta(days=7))),
+            ).fetchone()[0]
+            weeks.append({
+                "week": f"Н{i + 1}", "start": wstart.strftime("%d.%m"),
+                "load": round(planned / weekly_capacity * 100) if weekly_capacity else 0,
+            })
         return {
             "plan_fact": plan_fact,
             "lead_time_hours": round(float(lead_hours or 0), 1),
             "machines": machines,
             "queue": queue,
             "causes": causes,
+            "weeks": weeks,
             "defect_rate": round(defect_orders / total_orders * 100, 1) if total_orders else 0,
         }
 
