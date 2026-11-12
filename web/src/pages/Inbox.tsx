@@ -66,8 +66,11 @@ export function InboxPage({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [newLeadOpen, setNewLeadOpen] = useState(false);
+  const [actionNote, setActionNote] = useState("");
   const [allTemplates, setAllTemplates] = useState<TemplateItem[]>([]);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const detailIdRef = useRef<number | null>(null);
+  const lastDetailIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     api.templates().then((r) => setAllTemplates(r.items)).catch(() => setAllTemplates([]));
@@ -79,15 +82,31 @@ export function InboxPage({
     return matched.length > 0 ? matched : allTemplates.slice(0, 4);
   })();
 
-  const loadList = () => {
-    setLoading(true);
+  const fillTemplate = (t: TemplateItem) => {
+    const firstName = (detail?.client.name ?? "").split(" ")[0];
+    const last = detail?.orders[0];
+    const filled = t.body
+      .replaceAll("{name}", firstName)
+      .replaceAll("{product}", last?.product ?? "заказ")
+      .replaceAll("{order_status}", last ? ({ new: "принят", moderation: "на модерации", in_production: "в производстве", ready: "готов", delivered: "доставлен" } as Record<string, string>)[last.status] ?? last.status : "в работе")
+      .replaceAll("{promised}", last?.promised_at ? new Date(last.promised_at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) : "скоро");
+    setComposer(filled);
+  };
+
+  const filtersRef = useRef({ search: query, channel, status });
+  filtersRef.current = { search: query, channel, status };
+
+  const loadList = (silent = false) => {
+    if (!silent) setLoading(true);
     api
-      .conversations({ search: query, channel, status })
+      .conversations(filtersRef.current)
       .then((data) => {
         setItems(data.items);
         setError("");
       })
-      .catch(() => setError("Не удалось загрузить диалоги."))
+      .catch(() => {
+        if (!silent) setError("Не удалось загрузить диалоги.");
+      })
       .finally(() => setLoading(false));
   };
 
@@ -105,29 +124,95 @@ export function InboxPage({
     if (!selectedId && items.length > 0) setSelectedId(items[0].id);
   }, [items, selectedId]);
 
-  const loadDetail = (id: number) => {
-    setDetailLoading(true);
+  const loadDetail = (id: number, silent = false) => {
+    detailIdRef.current = id;
+    if (!silent) setDetailLoading(true);
     api
       .conversation(id)
-      .then(setDetail)
+      .then((data) => {
+        // Диалог мог смениться, пока летел ответ — не затираем свежий выбор.
+        if (detailIdRef.current === id) setDetail(data);
+      })
       .catch(() => {
+        if (detailIdRef.current !== id) return;
         setDetail(null);
         setError("Диалог недоступен: он вне вашей зоны доступа.");
       })
-      .finally(() => setDetailLoading(false));
+      .finally(() => {
+        if (detailIdRef.current === id) setDetailLoading(false);
+      });
   };
 
   useEffect(() => {
+    detailIdRef.current = null;
+    setActionNote("");
     if (selectedId) loadDetail(selectedId);
     else setDetail(null);
   }, [selectedId]);
+
+  const runOrderAction = async (action: "rush" | "redone" | "extend" | "promo") => {
+    const order = detail?.orders[0];
+    const conversationId = detail?.conversation.id;
+    if (!order || conversationId == null) return;
+    try {
+      const result = await api.orderAction(order.id, action);
+      setActionNote(result.message);
+      loadDetail(conversationId, true);
+      loadList(true);
+    } catch {
+      setActionNote("Действие недоступно: заказ вне вашей зоны доступа.");
+    }
+  };
+
+  // Real-time: SSE-событие «update» → тихо обновляем список и открытый диалог.
+  useEffect(() => {
+    const source = new EventSource("/api/events");
+    source.addEventListener("update", () => {
+      loadList(true);
+      if (detailIdRef.current) loadDetail(detailIdRef.current, true);
+    });
+    return () => source.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Горячие клавиши: Alt+цифра — шаблон, J/K — навигация по диалогам.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.altKey && /^[1-9]$/.test(event.key)) {
+        const template = chatTemplates[Number(event.key) - 1];
+        if (template) {
+          event.preventDefault();
+          fillTemplate(template);
+        }
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      const typing = !!target && (/^(input|textarea|select)$/i.test(target.tagName) || target.isContentEditable);
+      if (typing || newLeadOpen || (event.key !== "j" && event.key !== "k")) return;
+      if (items.length === 0) return;
+      const current = items.findIndex((item) => item.id === selectedId);
+      const fallback = current === -1 ? 0 : current;
+      const next = event.key === "j" ? Math.min(fallback + 1, items.length - 1) : Math.max(fallback - 1, 0);
+      if (next !== fallback) {
+        event.preventDefault();
+        setSelectedId(items[next].id);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   useEffect(() => {
     // Скроллим только контейнер сообщений: scrollIntoView прокручивал бы
     // заодно список диалогов, карточку клиента и саму страницу.
     const el = messagesRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [detail?.messages.length, detail?.conversation.mode]);
+    if (!el) return;
+    const openedAnother = lastDetailIdRef.current !== detail?.conversation.id;
+    lastDetailIdRef.current = detail?.conversation.id ?? null;
+    // При живом обновлении не дёргаем скролл, если менеджер читает историю выше.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+    if (openedAnother || nearBottom) el.scrollTop = el.scrollHeight;
+  }, [detail?.conversation.id, detail?.messages.length, detail?.conversation.mode]);
 
   const send = async () => {
     const body = composer.trim();
@@ -337,23 +422,14 @@ export function InboxPage({
               <div className="composer">
                 {!asLead && chatTemplates.length > 0 && (
                   <div className="template-chips">
-                    {chatTemplates.map((t) => (
+                    {chatTemplates.map((t, index) => (
                       <button
                         key={t.id}
                         className="template-chip"
                         title={t.body}
-                        onClick={() => {
-                          const firstName = (detail.client.name ?? "").split(" ")[0];
-                          const last = detail.orders[0];
-                          const filled = t.body
-                            .replaceAll("{name}", firstName)
-                            .replaceAll("{product}", last?.product ?? "заказ")
-                            .replaceAll("{order_status}", last ? ({ new: "принят", moderation: "на модерации", in_production: "в производстве", ready: "готов", delivered: "доставлен" } as Record<string, string>)[last.status] ?? last.status : "в работе")
-                            .replaceAll("{promised}", last?.promised_at ? new Date(last.promised_at).toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit" }) : "скоро");
-                          setComposer(filled);
-                        }}
+                        onClick={() => fillTemplate(t)}
                       >
-                        {t.title}
+                        {index < 9 ? `Alt+${index + 1} · ` : ""}{t.title}
                       </button>
                     ))}
                   </div>
@@ -366,6 +442,14 @@ export function InboxPage({
                       if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                         event.preventDefault();
                         send();
+                      } else if (event.key === "Tab" && !event.shiftKey && !composer.trim() && !asLead) {
+                        // Tab на пустом поле — принять последний ответ Magi как черновик.
+                        const magi = detail?.messages.filter((m) => m.author === "magi") ?? [];
+                        const last = magi[magi.length - 1];
+                        if (last) {
+                          event.preventDefault();
+                          setComposer(last.body);
+                        }
                       }
                     }}
                     placeholder={
@@ -398,7 +482,7 @@ export function InboxPage({
                     {asLead
                       ? "Magi ответит автоматически, если уверен. Иначе передаст диалог человеку."
                       : "Ответ менеджера переводит диалог в ручной режим."}
-                    {" "}Ctrl+Enter — отправить.
+                    {" "}Ctrl+Enter — отправить · Tab — ответ Magi · Alt+цифра — шаблон · J/K — диалоги.
                   </p>
                 </div>
               </div>
@@ -462,6 +546,19 @@ export function InboxPage({
                 )}
               </div>
 
+              {detail.orders[0] && user.role !== "analyst" && (
+                <div className="context-block">
+                  <div className="context-label">Быстрые действия</div>
+                  <div className="order-actions">
+                    <button className="btn btn-small" onClick={() => runOrderAction("rush")} title="Поставить заказ первым в очереди цеха">Срочная печать</button>
+                    <button className="btn btn-small" onClick={() => runOrderAction("redone")} title="Создать повтор печати без оплаты">Повтор печати</button>
+                    <button className="btn btn-small" onClick={() => runOrderAction("extend")} title="+3 дня хранения в пункте выдачи">Продлить ПВЗ</button>
+                    <button className="btn btn-small" onClick={() => runOrderAction("promo")} title="Промокод −10% в карточку клиента">Промокод −10%</button>
+                  </div>
+                  {actionNote && <p className="order-action-note">{actionNote}</p>}
+                </div>
+              )}
+
               <div className="context-block">
                 <div className="context-label">Следующий шаг</div>
                 <div className={`next-step ${conversation?.mode === "human" ? "next-human" : ""}`}>
@@ -517,6 +614,7 @@ function NewLeadModal({
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [channel, setChannel] = useState("site");
+  const [tgHandle, setTgHandle] = useState("");
   const [message, setMessage] = useState("Здравствуйте! Хочу узнать о фотокниге.");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -525,7 +623,7 @@ function NewLeadModal({
     if (!name.trim() || saving) return;
     setSaving(true);
     try {
-      const result = await api.createLead({ name, phone, channel, message });
+      const result = await api.createLead({ name, phone, channel, message, tg_handle: tgHandle });
       onCreated(result.conversation_id);
     } catch {
       setError("Не удалось создать лида.");
@@ -565,6 +663,16 @@ function NewLeadModal({
             <option value="instagram">Instagram</option>
           </select>
         </label>
+        {channel === "telegram" && (
+          <label className="field">
+            <span>Telegram ID или @name</span>
+            <input
+              value={tgHandle}
+              onChange={(event) => setTgHandle(event.target.value)}
+              placeholder="1287875313 или @ivan"
+            />
+          </label>
+        )}
         <label className="field field-wide">
           <span>Первое сообщение</span>
           <textarea value={message} onChange={(event) => setMessage(event.target.value)} rows={3} />

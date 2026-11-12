@@ -399,3 +399,139 @@ def test_learning_loop_grows_kb_and_rules():
 
     audit_actions = [r["action"] for r in client.get("/api/audit").json()["items"]]
     assert "kb.grow" in audit_actions or "rules.create" in audit_actions
+
+
+def test_lead_with_telegram_handle_and_client_patch():
+    login("director@magi.by")
+    created = client.post("/api/leads", json={
+        "name": "Тг Лид", "phone": "", "channel": "telegram",
+        "message": "Здравствуйте, хочу фотокнигу!", "tg_handle": "ivanov",
+    })
+    assert created.status_code == 200, created.text
+    detail = client.get(f"/api/conversations/{created.json()['conversation_id']}").json()
+    client_id = detail["client"]["id"]
+    assert detail["client"]["tg_handle"] == "@ivanov"  # нормализовали в @name
+
+    patched = client.patch(
+        f"/api/clients/{client_id}",
+        json={"phone": "+375 29 111-22-33", "tg_handle": "1287875313"},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["phone"] == "+375 29 111-22-33"
+    assert patched.json()["tg_handle"] == "1287875313"
+
+    client.cookies.clear()
+    login("analyst@magi.by")
+    assert client.patch(f"/api/clients/{client_id}", json={"phone": "x"}).status_code == 403
+
+
+def test_capture_name_from_dialog():
+    login("director@magi.by")
+    created = client.post("/api/leads", json={
+        "name": "Клиент Telegram", "phone": "", "channel": "telegram",
+        "message": "Привет! Меня зовут Артём Сулима.", "tg_handle": "@artem",
+    })
+    conv_id = created.json()["conversation_id"]
+    detail = client.get(f"/api/conversations/{conv_id}").json()
+    assert detail["client"]["name"] == "Артём Сулима"  # имя захвачено из первого сообщения
+
+    response = client.post(
+        f"/api/conversations/{conv_id}/messages",
+        json={"author": "lead", "body": "Меня зовут Пётр Иванов"},
+    )
+    assert response.status_code == 200
+    detail = client.get(f"/api/conversations/{conv_id}").json()
+    assert detail["client"]["name"] == "Артём Сулима"  # имя уже известно — не перезаписываем
+
+
+def test_rescue_run_sends_and_does_not_repeat():
+    login("director@magi.by")
+    with db.get_db() as conn:
+        cid = conn.execute(
+            "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, tg_handle, created_at) "
+            "VALUES ('Rescue Клиент', '', '', '', 'telegram', 'telegram', 'customer', 0, 1, 3, 'Клиентский сервис', '', '', '7700000099', '2026-01-01T00:00:00Z')"
+        ).lastrowid
+        oid = conn.execute(
+            "INSERT INTO orders (client_id, product, amount, cost, channel, payment, status, created_at, promised_at, defect) "
+            "VALUES (?, 'Фотокнига Rescue', 50, 20, 'telegram', 'online', 'in_production', '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z', 0)",
+            (cid,),
+        ).lastrowid
+        cvid = conn.execute(
+            "INSERT INTO conversations (client_id, channel, subject, topic, status, mode, assignee_id, team, magi_enabled, last_message_at, created_at) "
+            "VALUES (?, 'telegram', 'Rescue', 'order_status', 'open', 'magi', 3, 'Клиентский сервис', 1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            (cid,),
+        ).lastrowid
+
+    result = client.post("/api/rescue/run")
+    assert result.status_code == 200, result.text
+    assert result.json()["sent"] >= 1
+
+    messages = client.get(f"/api/conversations/{cvid}").json()["messages"]
+    rescue_messages = [m for m in messages if m["intent"] == "rescue"]
+    assert len(rescue_messages) == 1
+    assert "Фотокнига Rescue" in rescue_messages[0]["body"]
+
+    # повторный скан не шлёт второе сообщение по тому же заказу
+    result2 = client.post("/api/rescue/run").json()
+    assert result2["sent"] == 0
+    messages = client.get(f"/api/conversations/{cvid}").json()["messages"]
+    assert len([m for m in messages if m["intent"] == "rescue"]) == 1
+
+
+def test_order_actions_rush_promo_extend_redone():
+    login("director@magi.by")
+    with db.get_db() as conn:
+        cid = conn.execute(
+            "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, created_at) "
+            "VALUES ('Action Клиент', '', '', '', 'site', 'magi', 'customer', 0, 1, 3, 'Клиентский сервис', '', '', '2026-01-01T00:00:00Z')"
+        ).lastrowid
+        oid = conn.execute(
+            "INSERT INTO orders (client_id, product, amount, cost, channel, payment, status, created_at, defect) "
+            "VALUES (?, 'Фотокнига Act', 50, 20, 'site', 'online', 'in_production', '2026-01-01T00:00:00Z', 0)",
+            (cid,),
+        ).lastrowid
+        conn.execute(
+            "INSERT INTO pickups (order_id, location, ready_at, expires_at) VALUES (?, 'ПВЗ Минск', '2026-01-02T00:00:00Z', '2026-01-05T00:00:00Z')",
+            (oid,),
+        )
+
+    rush = client.post(f"/api/orders/{oid}/action", json={"action": "rush"})
+    assert rush.status_code == 200, rush.text
+    with db.get_db() as conn:
+        job = conn.execute("SELECT * FROM machine_jobs WHERE order_id = ?", (oid,)).fetchone()
+        assert job is not None
+
+    promo = client.post(f"/api/orders/{oid}/action", json={"action": "promo"})
+    assert promo.status_code == 200 and "MAGI10" in promo.json()["message"]
+    detail = client.get(f"/api/clients/{cid}").json()
+    assert "MAGI10" in detail["client"]["notes"]
+
+    extend = client.post(f"/api/orders/{oid}/action", json={"action": "extend"})
+    assert extend.status_code == 200 and "продлено" in extend.json()["message"]
+
+    redone = client.post(f"/api/orders/{oid}/action", json={"action": "redone"})
+    assert redone.status_code == 200
+    detail = client.get(f"/api/clients/{cid}").json()
+    assert any("(повтор печати)" in o["product"] for o in detail["orders"])
+
+
+def test_telegram_matches_lead_created_by_handle():
+    """Лид из CRM по @name: сообщение от этого пользователя бэкфиллит числовой ID."""
+    import asyncio
+
+    from server.telegram_bot import ingest_telegram_message
+
+    login("director@magi.by")
+    created = client.post("/api/leads", json={
+        "name": "Матч Лид", "channel": "telegram", "message": "Привет!", "tg_handle": "@match_user",
+    })
+    conv_id = created.json()["conversation_id"]
+
+    reply = asyncio.run(ingest_telegram_message("555000", "Матч Лид", "match_user", "Когда будет доставка?"))
+    assert reply is not None
+    with db.get_db() as conn:
+        row = conn.execute("SELECT * FROM clients WHERE tg_handle = '555000'").fetchone()
+        assert row is not None and row["name"] == "Матч Лид"  # тот же клиент, ID бэкфиллен
+        detail = client.get(f"/api/conversations/{conv_id}").json()
+        bodies = [m["body"] for m in detail["messages"]]
+        assert "Когда будет доставка?" in bodies  # сообщение попало в тот же диалог

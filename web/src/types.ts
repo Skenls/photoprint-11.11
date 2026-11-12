@@ -90,6 +90,7 @@ export interface Client {
   team: string;
   tags: string;
   notes: string;
+  tg_handle?: string;
   created_at: string;
   owner_name?: string;
   last_product?: string;

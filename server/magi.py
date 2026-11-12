@@ -93,6 +93,27 @@ def _first_name(name: str) -> str:
     return name.split()[0] if name else "друг"
 
 
+# Имя клиента, названное в диалоге: «меня зовут Иван», «моё имя Иван Петров».
+NAME_PATTERNS = (
+    re.compile(r"меня зовут\s+([А-ЯЁ][а-яё\-]+(?:\s+[А-ЯЁ][а-яё\-]+){0,2})", re.IGNORECASE),
+    re.compile(r"мо[её] имя\s*[—–-]?\s*([А-ЯЁ][а-яё\-]+(?:\s+[А-ЯЁ][а-яё\-]+){0,2})", re.IGNORECASE),
+)
+GENERIC_NAMES = {"", "клиент", "клиент telegram"}
+
+
+def extract_name(text: str) -> str | None:
+    for pattern in NAME_PATTERNS:
+        match = pattern.search(text or "")
+        if match:
+            return match.group(1).strip().title()
+    return None
+
+
+def client_name_known(name: str) -> bool:
+    value = (name or "").strip().lower()
+    return bool(value) and value not in GENERIC_NAMES and not value.startswith("@")
+
+
 def _date(value: str | None) -> str:
     if not value:
         return "—"

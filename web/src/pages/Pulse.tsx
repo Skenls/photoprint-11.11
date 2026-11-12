@@ -25,15 +25,34 @@ export function Pulse({ user, onNavigate }: { user: User; onNavigate: (page: str
   const [data, setData] = useState<PulsePayload | null>(null);
   const [error, setError] = useState("");
   const [decisionFor, setDecisionFor] = useState<{ kpi_key: string; problem: string; cause: string } | null>(null);
+  const [rescueNote, setRescueNote] = useState("");
+  const [rescueBusy, setRescueBusy] = useState(false);
 
   useEffect(() => {
     api.pulse().then(setData).catch((e) => setError(e.message));
   }, []);
 
+  const runRescue = async () => {
+    setRescueBusy(true);
+    try {
+      const result = await api.rescueRun();
+      setRescueNote(
+        result.sent > 0
+          ? `Rescue-скан: заказов под угрозой ${result.checked}, предупреждений отправлено ${result.sent}.`
+          : "Rescue-скан: заказов под угрозой срока нет.",
+      );
+    } catch {
+      setRescueNote("Rescue-скан недоступен.");
+    } finally {
+      setRescueBusy(false);
+    }
+  };
+
   if (error) return <ErrorNote text={error} />;
   if (!data) return <Spinner label="Собираем пульс компании…" />;
 
   const reds = data.kpis.filter((k) => k.status === "red");
+  const canRescue = user.role === "director" || user.role === "head";
 
   return (
     <div className="page">
@@ -46,10 +65,19 @@ export function Pulse({ user, onNavigate }: { user: User; onNavigate: (page: str
             открытых решений: {data.open_decisions}
           </p>
         </div>
-        <button className="btn" onClick={() => onNavigate("decisions")}>
-          Реестр решений <IconArrow size={16} />
-        </button>
+        <div className="page-head-actions">
+          {canRescue && (
+            <button className="btn" onClick={runRescue} disabled={rescueBusy} title="Rescue-агент предупреждает клиента заранее, если срок под угрозой. Автоматически каждые 10 минут.">
+              {rescueBusy ? "Сканируем…" : "Спасение заказов"}
+            </button>
+          )}
+          <button className="btn" onClick={() => onNavigate("decisions")}>
+            Реестр решений <IconArrow size={16} />
+          </button>
+        </div>
       </header>
+
+      {rescueNote && <p className="rescue-note">{rescueNote}</p>}
 
       {reds.length === 0 ? (
         <div className="pulse-ok">

@@ -3031,6 +3031,45 @@ h2 {
   color: #6f4300;
 }
 
+.order-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.order-actions .btn {
+  justify-content: center;
+}
+
+.order-action-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  color: var(--accent-strong);
+}
+
+.client-edit {
+  display: grid;
+  gap: 8px;
+}
+
+.rescue-note {
+  margin: -6px 0 14px;
+  padding: 8px 12px;
+  border: 1px solid #D3E4C8;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .chat-empty {
   flex: 1;
   display: grid;

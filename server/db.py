@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS orders (
     promised_at TEXT,
     delivered_at TEXT,
     defect INTEGER NOT NULL DEFAULT 0,
-    delay_reason TEXT
+    delay_reason TEXT,
+    rescued_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -369,8 +370,16 @@ TOPIC_BY_KEY = {key: (name, sla) for key, name, sla, _ in TOPICS}
 def init_db() -> None:
     with get_db() as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             seed(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Добавляем колонки, которых нет в уже созданной БД."""
+    orders_columns = {row[1] for row in conn.execute("PRAGMA table_info(orders)")}
+    if "rescued_at" not in orders_columns:
+        conn.execute("ALTER TABLE orders ADD COLUMN rescued_at TEXT")
 
 
 def reset_db() -> None:

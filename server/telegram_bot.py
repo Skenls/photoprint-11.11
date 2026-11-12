@@ -21,7 +21,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message as TgMessage
 
 from . import db
-from .magi import reply as magi_reply, summary_for_manager
+from .magi import client_name_known, extract_name, reply as magi_reply, summary_for_manager
 from .db import get_db, iso, utcnow
 
 PENDING_INTERVAL = 2.0
@@ -37,18 +37,29 @@ def _first_operator(conn) -> dict | None:
 
 def _resolve_client(conn, tg_id: str, display_name: str, username: str | None) -> dict:
     row = conn.execute("SELECT * FROM clients WHERE tg_handle = ?", (tg_id,)).fetchone()
-    if row is not None:
-        return dict(row)
-    operator = _first_operator(conn)
-    owner_id, team = (operator["id"], operator["team"]) if operator else (None, "Клиентский сервис")
-    name = display_name or (f"@{username}" if username else "Клиент Telegram")
-    now = iso(utcnow())
-    cursor = conn.execute(
-        "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, tg_handle, created_at) "
-        "VALUES (?, '', '', '', 'telegram', 'telegram', 'new', 0, 1, ?, 'Клиентский сервис', '', 'Из Telegram-бота', ?, ?)",
-        (name, owner_id, tg_id, now),
-    )
-    return dict(conn.execute("SELECT * FROM clients WHERE id = ?", (cursor.lastrowid,)).fetchone())
+    if row is None and username:
+        # Лид мог быть создан из CRM по @username — сопоставляем и бэкфиллим числовой ID.
+        row = conn.execute(
+            "SELECT * FROM clients WHERE lower(tg_handle) = ?", (f"@{username.lower()}",)
+        ).fetchone()
+        if row is not None and row["tg_handle"] != tg_id:
+            conn.execute("UPDATE clients SET tg_handle = ? WHERE id = ?", (tg_id, row["id"]))
+    if row is None:
+        operator = _first_operator(conn)
+        owner_id, team = (operator["id"], operator["team"]) if operator else (None, "Клиентский сервис")
+        name = display_name or (f"@{username}" if username else "Клиент Telegram")
+        now = iso(utcnow())
+        cursor = conn.execute(
+            "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, tg_handle, created_at) "
+            "VALUES (?, '', '', '', 'telegram', 'telegram', 'new', 0, 1, ?, 'Клиентский сервис', '', 'Из Telegram-бота', ?, ?)",
+            (name, owner_id, tg_id, now),
+        )
+        return dict(conn.execute("SELECT * FROM clients WHERE id = ?", (cursor.lastrowid,)).fetchone())
+    client = dict(row)
+    if not client_name_known(client.get("name", "")) and client_name_known(display_name):
+        client["name"] = display_name.strip()
+        conn.execute("UPDATE clients SET name = ? WHERE id = ?", (client["name"], client["id"]))
+    return client
 
 
 def _open_conversation(conn, client: dict) -> dict:
@@ -90,6 +101,11 @@ async def ingest_telegram_message(tg_id: str, display_name: str, username: str |
         return None
     with get_db() as conn:
         client = _resolve_client(conn, tg_id, display_name, username)
+        if not client_name_known(client.get("name", "")):
+            captured = extract_name(text)
+            if captured:
+                client["name"] = captured
+                conn.execute("UPDATE clients SET name = ? WHERE id = ?", (captured, client["id"]))
         conversation = _open_conversation(conn, client)
         now = iso(utcnow())
         conn.execute(
@@ -179,7 +195,7 @@ async def outbox_worker(bot: Bot) -> None:
                     "SELECT o.id, o.body, c.tg_handle FROM tg_outbox o "
                     "JOIN conversations cv ON cv.id = o.conversation_id "
                     "JOIN clients c ON c.id = cv.client_id "
-                    "WHERE o.sent_at IS NULL AND c.tg_handle != '' ORDER BY o.id LIMIT 20"
+                    "WHERE o.sent_at IS NULL AND c.tg_handle GLOB '[0-9]*' ORDER BY o.id LIMIT 20"
                 ).fetchall()
                 for row in rows:
                     try:

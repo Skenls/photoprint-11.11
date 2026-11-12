@@ -103,11 +103,20 @@ export const api = {
     city?: string;
     channel: string;
     message?: string;
+    tg_handle?: string;
   }) =>
     request<{ client_id: number; conversation_id: number }>("/leads", {
       method: "POST",
       body: JSON.stringify(data),
     }),
+  patchClient: (id: number, data: Partial<Pick<import("./types").Client, "name" | "phone" | "email" | "city" | "tg_handle">>) =>
+    request<import("./types").Client>(`/clients/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  orderAction: (id: number, action: "rush" | "redone" | "extend" | "promo") =>
+    request<{ ok: boolean; message: string }>(`/orders/${id}/action`, {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }),
+  rescueRun: () => request<{ checked: number; sent: number; skipped: number }>("/rescue/run", { method: "POST" }),
   agent: () => request<AgentPayload>("/agent"),
   updateAgent: (data: {
     magi_enabled?: boolean;

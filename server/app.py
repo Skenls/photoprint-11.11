@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
+import re
+import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import db
 from .magi import (
+    _date,
+    _first_name,
+    client_name_known,
+    extract_name,
     mask_text,
     masked_client,
     provider_info,
@@ -48,6 +57,135 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_html_cache(request: Request, call_next):
+    # index.html без кеша: после новой сборки браузер сразу видит свежий UI
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+# --------------------------------------------------------------------------- realtime (SSE)
+
+def _db_version(conn) -> str:
+    row = conn.execute(
+        "SELECT (SELECT COALESCE(MAX(id), 0) FROM messages) AS m, "
+        "(SELECT COALESCE(MAX(id), 0) FROM conversations) AS c, "
+        "(SELECT COALESCE(MAX(id), 0) FROM clients) AS cl, "
+        "(SELECT COALESCE(MAX(id), 0) FROM orders) AS o"
+    ).fetchone()
+    return f"{row['m']}:{row['c']}:{row['cl']}:{row['o']}"
+
+
+@app.get("/api/events")
+async def events(request: Request, user: dict = Depends(current_user)):
+    """SSE-стрим: событие update при любом изменении данных (сообщения, диалоги, клиенты, заказы)."""
+    async def stream():
+        last = ""
+        try:
+            while True:
+                if await request.is_disconnected():
+                    return
+                with db.get_db() as conn:
+                    version = _db_version(conn)
+                if version != last:
+                    last = version
+                    yield "event: update\ndata: {}\n\n"
+                else:
+                    yield ": ping\n\n"
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            return
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --------------------------------------------------------------------------- rescue agent
+
+RESCUE_INTERVAL_MINUTES = 10
+
+
+def _rescue_scan(conn, user_name: str = "Magi") -> dict:
+    """Находим заказы под угрозой срока и шлём упреждающее сообщение клиенту."""
+    now = _now()
+    horizon = _iso(now + timedelta(hours=36))
+    at_risk = conn.execute(
+        "SELECT o.id, o.client_id, o.product, o.status, o.promised_at FROM orders o "
+        "WHERE o.rescued_at IS NULL AND o.delivered_at IS NULL AND o.promised_at IS NOT NULL "
+        "AND o.promised_at <= ? AND o.status IN ('new', 'moderation', 'in_production', 'delayed') "
+        "ORDER BY o.promised_at LIMIT 20",
+        (horizon,),
+    ).fetchall()
+    sent, skipped = 0, 0
+    when = _iso(now)
+    for order in at_risk:
+        client = _client(conn, order["client_id"])
+        conv = conn.execute(
+            "SELECT * FROM conversations WHERE client_id = ? AND status != 'closed' "
+            "ORDER BY last_message_at DESC LIMIT 1",
+            (order["client_id"],),
+        ).fetchone()
+        if conv is None:
+            skipped += 1
+            continue
+        promised = _date(order["promised_at"])
+        late = order["promised_at"] < _iso(now)
+        body = (
+            f"{_first_name(client.get('name', ''))}, проверили ваш заказ «{order['product']}» в цехе: "
+            f"{'срок сдвигается, менеджер свяжется и предложит решение' if late else 'печатаем по плану, обещанный срок соблюдаем'}. "
+            f"Обещано к {promised}. Следим за заказом и предупредим, если что-то изменится."
+        )
+        conn.execute(
+            "INSERT INTO messages (conversation_id, author, body, intent, confidence, provider, created_at) "
+            "VALUES (?, 'magi', ?, 'rescue', 0.9, 'offline', ?)",
+            (conv["id"], body, when),
+        )
+        _touch(conn, conv["id"], when)
+        if conv["channel"] == "telegram" and (client.get("tg_handle") or "").isdigit():
+            conn.execute(
+                "INSERT INTO tg_outbox (conversation_id, body, created_at) VALUES (?, ?, ?)",
+                (conv["id"], body, when),
+            )
+        conn.execute("UPDATE orders SET rescued_at = ? WHERE id = ?", (when, order["id"]))
+        log_audit(conn, {"id": None, "name": user_name}, "magi.rescue", "order", order["id"], body[:120])
+        sent += 1
+    return {"checked": len(at_risk), "sent": sent, "skipped": skipped}
+
+
+@app.post("/api/rescue/run")
+def rescue_run(user: dict = Depends(require_roles("director", "head"))):
+    with db.get_db() as conn:
+        result = _rescue_scan(conn, user["name"])
+        log_audit(conn, user, "rescue.run", "system", None, f"sent={result['sent']} skipped={result['skipped']}")
+        return result
+
+
+async def _rescue_loop():
+    while True:
+        await asyncio.sleep(RESCUE_INTERVAL_MINUTES * 60)
+        try:
+            with db.get_db() as conn:
+                _rescue_scan(conn)
+        except Exception:
+            pass
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(_rescue_loop())
+    yield
+    task.cancel()
+
+
+# Приложение создаётся выше по модулю; подключаем lifespan пост-фактум.
+app.router.lifespan_context = lifespan
 
 
 @app.middleware("http")
@@ -125,6 +263,18 @@ def _orders(conn, client_id: int) -> list[dict]:
     return [dict(r) for r in conn.execute(
         "SELECT * FROM orders WHERE client_id = ? ORDER BY created_at DESC", (client_id,)
     ).fetchall()]
+
+
+def _capture_client_name(conn, client_id: int, text: str) -> None:
+    """Имя клиента неизвестно в базе — забираем из его сообщения («меня зовут …»)."""
+    if not text.strip():
+        return
+    row = conn.execute("SELECT name FROM clients WHERE id = ?", (client_id,)).fetchone()
+    if row is None or client_name_known(row["name"]):
+        return
+    captured = extract_name(text)
+    if captured:
+        conn.execute("UPDATE clients SET name = ? WHERE id = ?", (captured, client_id))
 
 
 def _kb(conn) -> list[dict]:
@@ -227,6 +377,23 @@ class NewLeadIn(BaseModel):
     city: str = Field(default="Минск", max_length=80)
     channel: Literal["site", "telegram", "email", "instagram"] = "site"
     message: str = Field(default="Здравствуйте! Хочу узнать о фотокниге.", max_length=1000)
+    tg_handle: str = Field(default="", max_length=60)
+
+
+class ClientPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=120)
+    city: str | None = Field(default=None, max_length=80)
+    tg_handle: str | None = Field(default=None, max_length=60)
+
+
+def normalize_tg_handle(value: str) -> str:
+    """«1287875313» остаётся числовым ID, «ivan» / «@ivan» хранится как «@ivan»."""
+    handle = (value or "").strip().lstrip("@")
+    if not handle:
+        return ""
+    return handle if handle.isdigit() else f"@{handle}"
 
 
 class AgentSettingsIn(BaseModel):
@@ -482,10 +649,10 @@ async def create_lead(data: NewLeadIn, user: dict = Depends(current_user)):
                 raise HTTPException(status_code=500, detail="Нет доступного менеджера")
             owner_id, team = manager["id"], manager["team"]
         cursor = conn.execute(
-            "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'magi', 'new', 0, 1, ?, ?, '', '', ?)",
+            "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, tg_handle, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'magi', 'new', 0, 1, ?, ?, '', '', ?, ?)",
             (data.name.strip(), data.phone.strip(), data.email.strip(), data.city.strip(), data.channel,
-             owner_id, team, now),
+             owner_id, team, normalize_tg_handle(data.tg_handle), now),
         )
         client_id = cursor.lastrowid
         conv_cursor = conn.execute(
@@ -502,6 +669,8 @@ async def create_lead(data: NewLeadIn, user: dict = Depends(current_user)):
         conversation = _conversation(conn, conversation_id)
         client = _client(conn, client_id)
         if data.message.strip():
+            _capture_client_name(conn, client_id, data.message)
+            client = _client(conn, client_id)
             await _magi_answer(conn, conversation, client, data.message.strip())
         log_audit(conn, user, "lead.created", "client", client_id, f"{data.name} · {data.channel}")
         return {"client_id": client_id, "conversation_id": conversation_id}
@@ -531,6 +700,100 @@ def client_detail(client_id: int, user: dict = Depends(current_user)):
             "WHERE t.client_id = ?" + task_where + " ORDER BY t.status, t.due_at", task_params
         ).fetchall()]
         return {"client": client, "orders": orders, "conversations": conversations, "tasks": tasks}
+
+
+@app.patch("/api/clients/{client_id}")
+def patch_client(client_id: int, data: ClientPatch, user: dict = Depends(require_roles("director", "head", "operator"))):
+    with get_db() as conn:
+        where, params = client_scope(user, "c")
+        row = conn.execute(
+            f"SELECT c.id FROM clients c WHERE c.id = ? AND {where}", [client_id, *params]
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Клиент не найден")
+        fields = {
+            key: value.strip()
+            for key, value in data.model_dump().items()
+            if value is not None
+        }
+        if "tg_handle" in fields:
+            fields["tg_handle"] = normalize_tg_handle(fields["tg_handle"])
+        if not fields:
+            raise HTTPException(status_code=422, detail="Нет полей для обновления")
+        updates = ", ".join(f"{key} = ?" for key in fields)
+        conn.execute(f"UPDATE clients SET {updates} WHERE id = ?", (*fields.values(), client_id))
+        log_audit(conn, user, "client.patch", "client", client_id, ", ".join(fields))
+        return _client(conn, client_id)
+
+
+ORDER_ACTIONS = ("rush", "redone", "extend", "promo")
+
+
+@app.post("/api/orders/{order_id}/action")
+def order_action(order_id: int, data: dict, user: dict = Depends(require_roles("director", "head", "operator"))):
+    action = str(data.get("action", ""))
+    if action not in ORDER_ACTIONS:
+        raise HTTPException(status_code=422, detail="Неизвестное действие")
+    now_dt = _now()
+    when = _iso(now_dt)
+    with get_db() as conn:
+        where, params = client_scope(user, "c")
+        order = conn.execute(
+            f"SELECT o.* FROM orders o JOIN clients c ON c.id = o.client_id "
+            f"WHERE o.id = ? AND {where}",
+            [order_id, *params],
+        ).fetchone()
+        if order is None:
+            raise HTTPException(status_code=404, detail="Заказ не найден")
+
+        if action == "rush":
+            job = conn.execute(
+                "SELECT id FROM machine_jobs WHERE order_id = ? AND status != 'done' ORDER BY id LIMIT 1",
+                (order_id,),
+            ).fetchone()
+            if job is not None:
+                conn.execute(
+                    "UPDATE machine_jobs SET planned_start = ?, status = 'queued' WHERE id = ?",
+                    (when, job["id"]),
+                )
+                message = "Заказ передвинут в начало очереди цеха."
+            else:
+                machine = conn.execute("SELECT id FROM machines ORDER BY id LIMIT 1").fetchone()
+                conn.execute(
+                    "INSERT INTO machine_jobs (machine_id, order_id, est_minutes, status, planned_start) "
+                    "VALUES (?, ?, 60, 'queued', ?)",
+                    (machine["id"], order_id, when),
+                )
+                message = "Заказ поставлен в срочную печать."
+        elif action == "redone":
+            conn.execute(
+                "INSERT INTO orders (client_id, product, amount, cost, channel, payment, status, created_at, promised_at, defect, delay_reason) "
+                "VALUES (?, ?, 0, 0, ?, ?, 'new', ?, ?, 0, 'Перезапуск брака')",
+                (order["client_id"], f"{order['product']} (повтор печати)", order["channel"],
+                 order["payment"], when, _iso(now_dt + timedelta(days=1))),
+            )
+            conn.execute("UPDATE orders SET status = 'delayed', delay_reason = 'Брак, отправлен в перепечать' WHERE id = ?", (order_id,))
+            message = "Создан заказ на повтор печати, бракованный помечен как задержанный."
+        elif action == "extend":
+            pickup = conn.execute(
+                "SELECT id, expires_at FROM pickups WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if pickup is None:
+                raise HTTPException(status_code=404, detail="Заказ не находится в ПВЗ")
+            expires = datetime.fromisoformat(pickup["expires_at"]) + timedelta(days=3)
+            conn.execute(
+                "UPDATE pickups SET expires_at = ?, reminded = 0 WHERE id = ?",
+                (_iso(expires), pickup["id"]),
+            )
+            message = f"Хранение в ПВЗ продлено до {_date(_iso(expires))}."
+        else:  # promo
+            code = f"MAGI10-{secrets.token_hex(2).upper()}"
+            note = f"\nПромокод {code} (−10%, выдан {when[:10]}) по заказу №{order_id}."
+            conn.execute("UPDATE clients SET notes = COALESCE(notes, '') || ? WHERE id = ?", (note, order["client_id"]))
+            message = f"Промокод {code} записан в карточку клиента."
+
+        log_audit(conn, user, f"order.{action}", "order", order_id, order["product"])
+        return {"ok": True, "message": message}
 
 
 # -------------------------------------------------------------------- conversations
@@ -612,6 +875,8 @@ async def send_message(conversation_id: int, data: MessageIn, user: dict = Depen
                     (conversation_id, body, when),
                 )
         else:
+            if data.author == "lead":
+                _capture_client_name(conn, conversation["client_id"], body)
             refreshed = _conversation(conn, conversation_id)
             client = _client(conn, conversation["client_id"])
             magi_message = await _magi_answer(conn, refreshed, client, body)

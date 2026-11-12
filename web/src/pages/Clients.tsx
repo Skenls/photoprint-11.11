@@ -68,17 +68,21 @@ export function ClientsPage({
     return () => window.clearTimeout(timer);
   }, [query, status, channel]);
 
+  const loadDetail = (id: number) => {
+    setDetailLoading(true);
+    api
+      .client(id)
+      .then(setDetail)
+      .catch(() => setDetail(null))
+      .finally(() => setDetailLoading(false));
+  };
+
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
       return;
     }
-    setDetailLoading(true);
-    api
-      .client(selectedId)
-      .then(setDetail)
-      .catch(() => setDetail(null))
-      .finally(() => setDetailLoading(false));
+    loadDetail(selectedId);
   }, [selectedId]);
 
   const title =
@@ -212,7 +216,7 @@ export function ClientsPage({
           ) : !detail ? (
             <EmptyState title="Карточка недоступна" text="Возможно, клиент вне вашей зоны доступа." />
           ) : (
-            <ClientCard detail={detail} onOpenInbox={onOpenInbox} />
+            <ClientCard detail={detail} onOpenInbox={onOpenInbox} onChanged={() => loadDetail(selectedId!)} />
           )}
         </aside>
       </div>
@@ -223,13 +227,56 @@ export function ClientsPage({
 function ClientCard({
   detail,
   onOpenInbox,
+  onChanged,
 }: {
   detail: ClientDetail;
   onOpenInbox: (conversationId: number) => void;
+  onChanged: () => void;
 }) {
   const { client, orders, conversations } = detail;
   const total = orders.reduce((sum, order) => sum + order.amount, 0);
   const openConversation = conversations.find((item) => item.status !== "closed") ?? conversations[0];
+  const [editing, setEditing] = useState(false);
+  const [form, setForm] = useState({
+    name: client.name,
+    phone: client.phone,
+    email: client.email,
+    city: client.city,
+    tg_handle: client.tg_handle ?? "",
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const startEdit = () => {
+    setForm({
+      name: client.name,
+      phone: client.phone,
+      email: client.email,
+      city: client.city,
+      tg_handle: client.tg_handle ?? "",
+    });
+    setError("");
+    setEditing(true);
+  };
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      await api.patchClient(client.id, {
+        name: form.name,
+        phone: form.phone,
+        email: form.email,
+        city: form.city,
+        tg_handle: form.tg_handle,
+      });
+      setEditing(false);
+      onChanged();
+    } catch {
+      setError("Не удалось сохранить изменения.");
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <Card className="detail-card" bodyClassName="card-body flush">
@@ -256,13 +303,45 @@ function ClientCard({
       </div>
 
       <div className="detail-section">
-        <h3>Контакты</h3>
-        <dl className="facts">
-          <div><dt>Телефон</dt><dd>{client.phone || "—"}</dd></div>
-          <div><dt>Email</dt><dd>{client.email || "—"}</dd></div>
-          <div><dt>Ответственный</dt><dd>{client.owner_name || "—"}</dd></div>
-          <div><dt>В базе с</dt><dd>{formatDateTime(client.created_at)}</dd></div>
-        </dl>
+        <div className="section-head">
+          <h3>Контакты</h3>
+          <button className="link-btn" onClick={editing ? () => setEditing(false) : startEdit}>
+            {editing ? "Отмена" : "Изменить"}
+          </button>
+        </div>
+        {editing ? (
+          <div className="client-edit">
+            <label className="field"><span>Имя</span>
+              <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </label>
+            <label className="field"><span>Телефон</span>
+              <input value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+            </label>
+            <label className="field"><span>Email</span>
+              <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+            </label>
+            <label className="field"><span>Город</span>
+              <input value={form.city} onChange={(e) => setForm({ ...form, city: e.target.value })} />
+            </label>
+            <label className="field"><span>Telegram ID / @name</span>
+              <input value={form.tg_handle} onChange={(e) => setForm({ ...form, tg_handle: e.target.value })} placeholder="1287875313 или @ivan" />
+            </label>
+            <button className="btn btn-primary" onClick={save} disabled={saving || !form.name.trim()}>
+              {saving ? "Сохраняем…" : "Сохранить"}
+            </button>
+            {error && <p className="note">{error}</p>}
+          </div>
+        ) : (
+          <dl className="facts">
+            <div><dt>Телефон</dt><dd>{client.phone || "—"}</dd></div>
+            <div><dt>Email</dt><dd>{client.email || "—"}</dd></div>
+            {(client.tg_handle || client.channel === "telegram") && (
+              <div><dt>Telegram</dt><dd>{client.tg_handle || "не указан"}</dd></div>
+            )}
+            <div><dt>Ответственный</dt><dd>{client.owner_name || "—"}</dd></div>
+            <div><dt>В базе с</dt><dd>{formatDateTime(client.created_at)}</dd></div>
+          </dl>
+        )}
         {client.tags && (
           <div className="tags">
             {client.tags.split(",").filter(Boolean).map((tag) => (
