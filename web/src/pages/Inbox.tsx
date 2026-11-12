@@ -67,7 +67,7 @@ export function InboxPage({
   const [error, setError] = useState("");
   const [newLeadOpen, setNewLeadOpen] = useState(false);
   const [allTemplates, setAllTemplates] = useState<TemplateItem[]>([]);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.templates().then((r) => setAllTemplates(r.items)).catch(() => setAllTemplates([]));
@@ -123,7 +123,10 @@ export function InboxPage({
   }, [selectedId]);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    // Скроллим только контейнер сообщений: scrollIntoView прокручивал бы
+    // заодно список диалогов, карточку клиента и саму страницу.
+    const el = messagesRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [detail?.messages.length, detail?.conversation.mode]);
 
   const send = async () => {
@@ -307,7 +310,7 @@ export function InboxPage({
                 </div>
               )}
 
-              <div className="messages">
+              <div className="messages" ref={messagesRef}>
                 {detail.messages.map((message) => (
                   <div key={message.id} className={`message message-${message.author}`}>
                     <div className="message-meta">
@@ -329,7 +332,6 @@ export function InboxPage({
                     )}
                   </div>
                 ))}
-                <div ref={bottomRef} />
               </div>
 
               <div className="composer">
@@ -356,14 +358,6 @@ export function InboxPage({
                     ))}
                   </div>
                 )}
-                <label className="lead-toggle">
-                  <input
-                    type="checkbox"
-                    checked={asLead}
-                    onChange={(event) => setAsLead(event.target.checked)}
-                  />
-                  <span>Демо: писать от лица клиента</span>
-                </label>
                 <div className="composer-row">
                   <textarea
                     value={composer}
@@ -379,7 +373,7 @@ export function InboxPage({
                         ? "Например: «Успеет ли фотокнига к 14 ноября?»"
                         : "Ответить клиенту…"
                     }
-                    rows={2}
+                    rows={3}
                     aria-label="Сообщение"
                   />
                   <button
@@ -391,12 +385,22 @@ export function InboxPage({
                     <span>{asLead ? "Как клиент" : "Отправить"}</span>
                   </button>
                 </div>
-                <p className="composer-hint">
-                  {asLead
-                    ? "Magi ответит автоматически, если уверен. Иначе передаст диалог человеку."
-                    : "Ответ менеджера переводит диалог в ручной режим."}
-                  {" "}Ctrl+Enter — отправить.
-                </p>
+                <div className="composer-foot">
+                  <label className="lead-toggle">
+                    <input
+                      type="checkbox"
+                      checked={asLead}
+                      onChange={(event) => setAsLead(event.target.checked)}
+                    />
+                    <span>Демо: писать от лица клиента</span>
+                  </label>
+                  <p className="composer-hint">
+                    {asLead
+                      ? "Magi ответит автоматически, если уверен. Иначе передаст диалог человеку."
+                      : "Ответ менеджера переводит диалог в ручной режим."}
+                    {" "}Ctrl+Enter — отправить.
+                  </p>
+                </div>
               </div>
             </>
           )}
