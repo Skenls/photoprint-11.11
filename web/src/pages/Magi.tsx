@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import type { AgentPayload, User } from "../types";
+import type { AgentPayload, LearningPayload, User } from "../types";
 import {
   Card,
   ErrorNote,
@@ -35,6 +35,9 @@ const CHANNELS = [
 
 export function Magi({ user }: { user: User }) {
   const [data, setData] = useState<AgentPayload | null>(null);
+  const [learning, setLearning] = useState<LearningPayload | null>(null);
+  const [learningError, setLearningError] = useState("");
+  const [learningBusy, setLearningBusy] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -51,7 +54,26 @@ export function Magi({ user }: { user: User }) {
 
   useEffect(() => {
     api.agent().then(apply).catch((e) => setError(e.message));
+    if (user.role === "director" || (user.role === "head" && user.team === "Клиентский сервис")) {
+      api.learning().then(setLearning).catch((e) => setLearningError(e.message));
+    }
   }, []);
+
+  async function grow(kind: "kb" | "rule", payload: { topic?: string; reason?: string }) {
+    setLearningBusy(kind + (payload.topic ?? payload.reason ?? ""));
+    setLearningError("");
+    try {
+      await api.applyLearning({ kind, ...payload });
+      setLearning(await api.learning());
+      if (kind === "kb") {
+        apply(await api.agent());
+      }
+    } catch (e) {
+      setLearningError(e instanceof Error ? e.message : "Не удалось применить");
+    } finally {
+      setLearningBusy("");
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -312,6 +334,92 @@ export function Magi({ user }: { user: User }) {
           )}
         </Card>
       </div>
+
+      {learning && (
+        <Card
+          title="Развитие Magi"
+          subtitle="Измерить → предложить → подтвердить → Magi растёт (30 дней)"
+          action={
+            <span className="muted small">
+              {learning.acceptance.filter((a) => a.acceptance_pct != null).length} тем под наблюдением
+            </span>
+          }
+        >
+          {learningError && <ErrorNote text={learningError} />}
+          <div className="learning-grid">
+            <div>
+              <h3 className="section-label">Принятость автоответов по темам</h3>
+              <div className="kb-row-wrap">
+                {learning.acceptance.filter((a) => a.auto > 0).slice(0, 8).map((a) => (
+                  <div className="learning-row" key={a.topic}>
+                    <span className="learning-topic">{a.name}</span>
+                    <div className="meter">
+                      <span
+                        className={a.acceptance_pct != null && a.acceptance_pct < 70 ? "t-red" : ""}
+                        style={{ width: `${a.acceptance_pct ?? 0}%` }}
+                      />
+                    </div>
+                    <strong>{a.acceptance_pct == null ? "—" : `${a.acceptance_pct}%`}</strong>
+                    <small>{a.auto} авто · {a.manager_answers} ответов менеджера</small>
+                  </div>
+                ))}
+                {learning.acceptance.every((a) => a.auto === 0) && (
+                  <p className="muted-note">Пока нет закрытых автоответов за период.</p>
+                )}
+              </div>
+              <p className="muted-note">
+                «Принятость» = доля диалогов, где клиент не вернулся с новым вопросом в течение 48 часов после
+                автоответа. Ниже 70% — тема кандидат на передачу человеку или правку правила.
+              </p>
+            </div>
+
+            <div>
+              <h3 className="section-label">Предложения на основе работы</h3>
+              {learning.rule_suggestions.length === 0 && learning.kb_suggestions.length === 0 && (
+                <p className="muted-note">Пока предложений нет: частые причины передачи появятся здесь.</p>
+              )}
+              {learning.rule_suggestions.map((s) => (
+                <div className="learning-suggest" key={s.reason}>
+                  <div>
+                    <strong>Частая передача: «{s.reason}»</strong>
+                    <small>{s.count} раз(а) за 30 дней → правило «{s.keywords.join(", ")}» → сразу человеку</small>
+                  </div>
+                  {(user.role === "director" || (user.role === "head" && user.team === "Клиентский сервис")) && (
+                    <button
+                      className="btn btn-small"
+                      disabled={learningBusy === "rule" + s.reason}
+                      onClick={() => grow("rule", { reason: s.reason })}
+                    >
+                      {learningBusy === "rule" + s.reason ? "…" : "Создать правило"}
+                    </button>
+                  )}
+                </div>
+              ))}
+              {learning.kb_suggestions.map((s) => (
+                <div className="learning-suggest" key={s.topic}>
+                  <div>
+                    <strong>База знаний: «{s.name}»</strong>
+                    <small>менеджеры отвечали {s.count} раз. Пример: «{s.sample_answer.slice(0, 90)}…»</small>
+                  </div>
+                  {(user.role === "director" || (user.role === "head" && user.team === "Клиентский сервис")) && (
+                    <button
+                      className="btn btn-small"
+                      disabled={learningBusy === "kb" + s.topic}
+                      onClick={() => grow("kb", { topic: s.topic })}
+                    >
+                      {learningBusy === "kb" + s.topic ? "…" : "В базу знаний"}
+                    </button>
+                  )}
+                </div>
+              ))}
+              <p className="muted-note">
+                Так Magi развивается по ходу работы: популярный ответ менеджера становится статьёй базы знаний,
+                частая причина передачи — правилом. Каждое применение — в журнале.
+              </p>
+            </div>
+          </div>
+        </Card>
+      )}
 
       <Card
         title="База знаний"

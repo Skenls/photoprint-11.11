@@ -9,6 +9,9 @@ import type {
   Decision,
   FinancePayload,
   HrPayload,
+  LearningPayload,
+  ImportApplyResult,
+  ImportReport,
   Message,
   PickupItem,
   ProductionPayload,
@@ -20,6 +23,7 @@ import type {
   TopicRow,
   User,
 } from "./types";
+
 
 const BASE = import.meta.env.VITE_API_URL ?? "/api";
 
@@ -34,7 +38,7 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  if (init.body) headers.set("Content-Type", "application/json");
+  if (init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const response = await fetch(`${BASE}${path}`, {
     credentials: "include",
     ...init,
@@ -147,4 +151,20 @@ export const api = {
   pickups: () => request<{ items: PickupItem[] }>("/pickups"),
   remindPickup: (id: number) =>
     request<{ ok: boolean; message: string }>(`/pickups/${id}/remind`, { method: "POST" }),
+  learning: () => request<LearningPayload>("/agent/learning"),
+  applyLearning: (data: { kind: "kb" | "rule"; topic?: string; reason?: string }) =>
+    request<{ ok: boolean; rule?: string; topic?: string }>("/agent/learning/apply", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  importPreview: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<ImportReport>("/import/preview", { method: "POST", body: form });
+  },
+  importApply: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<ImportApplyResult>("/import/apply", { method: "POST", body: form });
+  },
 };

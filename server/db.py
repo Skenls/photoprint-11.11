@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS clients (
     team TEXT NOT NULL,
     tags TEXT NOT NULL DEFAULT '',
     notes TEXT NOT NULL DEFAULT '',
+    tg_handle TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 
@@ -319,6 +320,16 @@ CREATE TABLE IF NOT EXISTS pickups (
     reminded INTEGER NOT NULL DEFAULT 0,
     reminded_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tg_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    sent_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tg_outbox_pending ON tg_outbox(sent_at);
 
 CREATE INDEX IF NOT EXISTS idx_clients_owner ON clients(owner_id);
 CREATE INDEX IF NOT EXISTS idx_clients_team ON clients(team);
@@ -569,6 +580,9 @@ def seed(conn: sqlite3.Connection) -> None:
     conn.execute(
         "UPDATE clients SET tags = TRIM(tags || ',VIP', ',') WHERE ltv >= 900 AND tags NOT LIKE '%VIP%'"
     )
+    # Telegram-демо: два клиента уже «в боте»
+    conn.execute("UPDATE clients SET tg_handle = '7000000001' WHERE id = 1")
+    conn.execute("UPDATE clients SET tg_handle = '7000000002' WHERE id = 3")
 
     # ---------------------------------------------------------------- станки
     conn.executemany(

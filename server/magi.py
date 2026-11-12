@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 
 import httpx
 
+from .prompts import CHAT_TOPICS, TOPIC_INTENT, build_context, task_prompt
+
 INTENT_LABELS = {
     "greeting": "Приветствие",
     "order_status": "Статус заказа",
@@ -300,52 +302,64 @@ def provider_info() -> dict:
     }
 
 
-SYSTEM_PROMPT = """Ты Magi — AI-ассистент клиентского сервиса компании Фотопринт.
-Компания печатает фотокниги, календари, холсты и фотографии. Средний срок — 1 рабочий день.
-
-Правила:
-1. Отвечай по-русски, кратко (2–4 предложения), обращайся по имени.
-2. Используй только данные клиента, заказов и базы знаний из сообщения. Не выдумывай цены, сроки и статусы.
-3. Если вопрос про брак, возврат, жалобу, персональную скидку, юридический вопрос или данных не хватает — handoff=true.
-4. Не обещай действий, которых нет в данных. Передача менеджеру — нормальный ответ.
-5. Персональные данные в контексте маскированы (телефоны, почта, инициалы). Не пытайся их восстановить.
-6. Верни ТОЛЬКО JSON без markdown:
-{"reply": "текст", "intent": "greeting|order_status|price|delivery|payment|discount|custom|complaint|handoff|other", "confidence": 0.0, "handoff": false, "handoff_reason": null}"""
+def detect_topic(text: str, rules: dict[str, dict] | None = None) -> str:
+    """Локальный классификатор темы (без LLM): маленькой модели промпт выбирается здесь."""
+    normalized = _norm(text)
+    r = _rules_map(rules)
+    if any(word in normalized for word in r["trigger.complaint"]["keywords"]):
+        if any(word in normalized for word in ("брак", "полосы", "плохо напечатали", "испортили")):
+            return "quality"
+        if any(word in normalized for word in ("возврат", "вернуть деньги")):
+            return "return"
+        return "complaint"
+    checks = [
+        ("order_status", ("мой заказ", "где заказ", "статус", "готов", "успеет", "успеваем", "когда будет", "придет", "пришл", "задерж")),
+        ("pickup", ("самовывоз", "пункт выдачи", "забрать", "пвз")),
+        ("production", ("сколько дней", "срок производств", "когда изготов")),
+        ("custom", ("индивидуальн", "макет", "нестандарт", "свадеб", "свой дизайн")),
+        ("discount", ("скидка", "промокод", "дешевле")),
+        ("payment", ("оплата", "оплатить", "картой", "предоплата", "рассрочк")),
+        ("delivery", ("доставка", "курьер", "привез")),
+        ("docs", ("счет", "счёт", "договор", "реквизит", "закрывающ")),
+        ("partnership", ("b2b", "опт", "партнер", "сотрудничеств", "корпоратив")),
+        ("promo", ("акция", "акции", "рассылк")),
+        ("price_book", ("цена", "стоимость", "сколько стоит", "прайс", "почем")),
+    ]
+    for topic, words in checks:
+        if any(word in normalized for word in words):
+            return topic
+    if any(word in normalized for word in _GREETINGS) and len(normalized) < 90:
+        return "greeting"
+    return "other"
 
 
 async def openai_reply(text: str, client: dict, orders: list[dict], kb: list[dict], channel: str,
-                       history: list[dict] | None = None) -> MagiResult | None:
-    """One OpenAI-compatible completion with masked CRM context. Returns None on any failure."""
+                       history: list[dict] | None = None,
+                       rules: dict[str, dict] | None = None) -> MagiResult | None:
+    """Динамический промпт под тему + минимальный срез контекста. Returns None on any failure."""
     key = os.getenv("MAGI_API_KEY", "").strip()
     if not key:
         return None
     base_url = os.getenv("MAGI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
     model = os.getenv("MAGI_MODEL", "gpt-4.1-mini")
-    context = {
-        "channel": channel,
-        "client": masked_client(client),
-        "orders": [
-            {k: order.get(k) for k in ("product", "amount", "status", "created_at", "promised_at", "delivered_at")}
-            for order in orders[:5]
-        ],
-        "knowledge_base": [{"topic": row["topic"], "answer": row["answer"]} for row in kb],
-    }
+    topic = detect_topic(text, rules)
+    messages: list[dict] = [{"role": "system", "content": task_prompt(topic)}]
+    if topic in CHAT_TOPICS and history:
+        messages += [
+            {"role": "user" if item.get("author") == "lead" else "assistant", "content": item.get("body", "")}
+            for item in (history or [])[-4:]
+            if item.get("body")
+        ]
+    context = build_context(topic, masked_client(client), orders, kb)
+    messages.append({
+        "role": "user",
+        "content": f"Сообщение клиента: {mask_text(text)}\n\nКонтекст CRM:\n{json.dumps(context, ensure_ascii=False)}",
+    })
     payload = {
         "model": model,
         "temperature": 0.2,
-        "max_tokens": 500,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            *[
-                {"role": "user" if item.get("author") == "lead" else "assistant", "content": item.get("body", "")}
-                for item in (history or [])[-6:]
-                if item.get("body")
-            ],
-            {
-                "role": "user",
-                "content": f"Сообщение лида: {mask_text(text)}\n\nДанные CRM:\n{json.dumps(context, ensure_ascii=False)}",
-            },
-        ],
+        "max_tokens": 300,
+        "messages": messages,
     }
     try:
         async with httpx.AsyncClient(timeout=20) as client_http:
@@ -368,11 +382,12 @@ async def openai_reply(text: str, client: dict, orders: list[dict], kb: list[dic
         reason = data.get("handoff_reason") if handoff else None
         return MagiResult(
             reply=reply_text,
-            intent=str(data.get("intent", "other")),
+            intent=TOPIC_INTENT.get(topic, "other"),
             confidence=confidence,
             handoff=handoff,
             handoff_reason=str(reason) if reason else ("Передано менеджеру" if handoff else None),
             provider=f"openai:{model}",
+            topic=topic,
         )
     except Exception:
         # Any provider/network/JSON failure falls back to the offline engine.
@@ -381,7 +396,7 @@ async def openai_reply(text: str, client: dict, orders: list[dict], kb: list[dic
 
 async def reply(text: str, client: dict, orders: list[dict], kb: list[dict], channel: str, threshold: float,
                 history: list[dict] | None = None, rules: dict[str, dict] | None = None) -> MagiResult:
-    result = await openai_reply(text, client, orders, kb, channel, history)
+    result = await openai_reply(text, client, orders, kb, channel, history, rules)
     if result is None:
         result = local_reply(text, client, orders, kb, threshold, rules, channel)
     if not result.handoff and result.confidence < threshold:

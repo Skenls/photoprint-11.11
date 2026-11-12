@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -595,6 +596,12 @@ async def send_message(conversation_id: int, data: MessageIn, user: dict = Depen
             )
             if conversation.get("first_response_at") is None:
                 conn.execute("UPDATE conversations SET first_response_at = ? WHERE id = ?", (when, conversation_id))
+            client = _client(conn, conversation["client_id"])
+            if conversation["channel"] == "telegram" and client.get("tg_handle"):
+                conn.execute(
+                    "INSERT INTO tg_outbox (conversation_id, body, created_at) VALUES (?, ?, ?)",
+                    (conversation_id, body, when),
+                )
         else:
             refreshed = _conversation(conn, conversation_id)
             client = _client(conn, conversation["client_id"])
@@ -1365,6 +1372,315 @@ def demo_reset(user: dict = Depends(require_roles("director"))):
         raise HTTPException(status_code=403, detail="Сброс доступен только в демо-режиме")
     db.reset_db()
     return {"ok": True}
+
+
+# ------------------------------------------------------------------------ import
+
+COLUMN_ALIASES: dict[str, list[str]] = {
+    "name": ["имя", "название", "клиент", "контакт", "name", "full name", "contact", "title"],
+    "first_name": ["first name", "given name", "имя"],
+    "last_name": ["last name", "surname", "фамилия"],
+    "phone": ["телефон", "мобильный", "phone", "mobile"],
+    "email": ["e-mail", "email", "почта", "mail"],
+    "city": ["город", "city"],
+    "source": ["источник", "source"],
+    "notes": ["комментарий", "comments", "заметки", "notes", "description"],
+    "tags": ["теги", "tags", "сегмент", "тип клиента"],
+}
+
+
+def _norm_header(header: str) -> str:
+    return " ".join(header.strip().lower().replace("ё", "е").split())
+
+
+def _map_headers(headers: list[str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for header in headers:
+        normalized = _norm_header(header)
+        for field, aliases in COLUMN_ALIASES.items():
+            if field in mapping:
+                continue
+            if normalized in aliases or any(normalized.startswith(a) for a in aliases):
+                mapping[field] = header
+                break
+    return mapping
+
+
+def _digits(phone: str) -> str:
+    return "".join(ch for ch in (phone or "") if ch.isdigit())[-9:]
+
+
+def _parse_import_file(content: bytes, filename: str) -> tuple[list[str], list[dict]]:
+    """CSV (utf-8/cp1251) или JSON со списком клиентов."""
+    if filename.lower().endswith(".json") or content[:1] in (b"{", b"["):
+        data = json.loads(content.decode("utf-8-sig", errors="replace"))
+        if isinstance(data, dict):
+            data = data.get("clients") or data.get("items") or []
+        rows = [dict(r) for r in data if isinstance(r, dict)]
+        if not rows:
+            raise HTTPException(status_code=422, detail="JSON пустой или без записей")
+        headers = sorted({k for r in rows for k in r.keys()})
+        return headers, rows
+    text = None
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        raise HTTPException(status_code=422, detail="Не удалось прочитать файл (utf-8/cp1251)")
+    import csv
+
+    first_line = text.splitlines()[0]
+    delimiter = ";" if (";" in first_line and "," not in first_line) else "," if "," in first_line else "\t" if "\t" in first_line else ","
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+    rows_raw = [row for row in reader if any(cell.strip() for cell in row)]
+    if not rows_raw:
+        raise HTTPException(status_code=422, detail="CSV пустой")
+    headers = rows_raw[0]
+    rows = []
+    for raw in rows_raw[1:]:
+        rows.append({headers[i]: raw[i].strip() if i < len(raw) else "" for i in range(len(headers))})
+    return headers, rows
+
+
+def _import_report(headers: list[str], rows: list[dict]) -> dict:
+    mapping = _map_headers(headers)
+    issues, create, merge = [], 0, 0
+    seen_keys: set[str] = set()
+    with get_db() as conn:
+        for row in rows:
+            record = {field: str(row.get(header, "")).strip() for field, header in mapping.items()}
+            phone_key = _digits(record.get("phone", ""))
+            email_key = (record.get("email") or "").lower()
+            key = phone_key or email_key
+            if not key:
+                issues.append(f"нет телефона и email: {record.get('name') or record}")
+                continue
+            existing = None
+            if phone_key:
+                existing = conn.execute(
+                    "SELECT id, name FROM clients WHERE substr(replace(replace(replace(phone, ' ', ''), '-', ''), '+', ''), -9) = ? LIMIT 1",
+                    (phone_key,),
+                ).fetchone()
+            if existing is None and email_key:
+                existing = conn.execute(
+                    "SELECT id, name FROM clients WHERE lower(email) = ? LIMIT 1", (email_key,)
+                ).fetchone()
+            if existing is not None:
+                merge += 1
+            else:
+                create += 1
+            if key in seen_keys:
+                issues.append(f"дубль внутри файла: {record.get('name')}")
+            seen_keys.add(key)
+    return {
+        "total_rows": len(rows),
+        "mapped_columns": mapping,
+        "unmapped_columns": [h for h in headers if h not in mapping.values()],
+        "will_create": create,
+        "will_merge": merge,
+        "issues": issues[:10],
+    }
+
+
+def _import_apply(headers: list[dict], rows: list[dict], user: dict, filename: str) -> dict:
+    mapping = _map_headers(headers)
+    if not mapping.get("name"):
+        raise HTTPException(status_code=422, detail="Не найдена колонка с именем клиента")
+    created, merged, skipped = 0, 0, 0
+    now = _iso(_now())
+    with get_db() as conn:
+        operator = conn.execute("SELECT id, team FROM users WHERE role = 'operator' ORDER BY id LIMIT 1").fetchone()
+        owner_id, team = (operator["id"], operator["team"]) if operator else (None, "Клиентский сервис")
+        for row in rows:
+            record = {field: str(row.get(header, "")).strip() for field, header in mapping.items()}
+            name = record.get("first_name") and record.get("last_name") \
+                and f"{record['first_name']} {record['last_name']}" or record.get("name")
+            if not name:
+                skipped += 1
+                continue
+            phone_key = _digits(record.get("phone", ""))
+            email_key = (record.get("email") or "").lower()
+            existing = None
+            if phone_key:
+                existing = conn.execute(
+                    "SELECT id, name FROM clients WHERE substr(replace(replace(replace(phone, ' ', ''), '-', ''), '+', ''), -9) = ? LIMIT 1",
+                    (phone_key,),
+                ).fetchone()
+            if existing is None and email_key:
+                existing = conn.execute(
+                    "SELECT id, name FROM clients WHERE lower(email) = ? LIMIT 1", (email_key,)
+                ).fetchone()
+            if existing is not None:
+                fields, params = [], []
+                for column in ("email", "city", "notes"):
+                    value = record.get(column)
+                    if value:
+                        fields.append(f"{column} = COALESCE(NULLIF({column}, ''), ?)")
+                        params.append(value)
+                if fields:
+                    params.append(existing["id"])
+                    conn.execute(f"UPDATE clients SET {', '.join(fields)} WHERE id = ?", params)
+                merged += 1
+                continue
+            channel_guess = record.get("source", "")
+            channel_value = channel_guess if channel_guess in CHANNELS else "site"
+            conn.execute(
+                "INSERT INTO clients (name, phone, email, city, channel, source, status, ltv, consent, owner_id, team, tags, notes, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'new', 0, 1, ?, 'Клиентский сервис', ?, ?, ?)",
+                (name, record.get("phone", ""), record.get("email", ""), record.get("city", ""),
+                 channel_value, f"import:{filename}", owner_id, record.get("tags", ""), record.get("notes", ""), now),
+            )
+            created += 1
+        log_audit(conn, user, "import.apply", "clients", None,
+                  f"{filename}: создано {created}, объединено {merged}, пропущено {skipped}")
+    return {"created": created, "merged": merged, "skipped": skipped}
+
+
+@app.post("/api/import/preview")
+async def import_preview(file: UploadFile = File(...), user: dict = Depends(require_roles("director"))):
+    content = await file.read()
+    if len(content) > 5_000_000:
+        raise HTTPException(status_code=413, detail="Файл больше 5 МБ")
+    headers, rows = _parse_import_file(content, file.filename or "upload.csv")
+    report = _import_report(headers, rows)
+    report["filename"] = file.filename
+    return report
+
+
+@app.post("/api/import/apply")
+async def import_apply(file: UploadFile = File(...), user: dict = Depends(require_roles("director"))):
+    content = await file.read()
+    if len(content) > 5_000_000:
+        raise HTTPException(status_code=413, detail="Файл больше 5 МБ")
+    headers, rows = _parse_import_file(content, file.filename or "upload.csv")
+    report = _import_report(headers, rows)
+    if report["total_rows"] == 0:
+        raise HTTPException(status_code=422, detail="Нет распознанных строк")
+    result = _import_apply(headers, rows, user, file.filename or "upload.csv")
+    return {**result, "report": report}
+
+
+# ----------------------------------------------------------------------- learning
+
+@app.get("/api/agent/learning")
+def agent_learning(user: dict = Depends(require_roles("director", "head"))):
+    if user["role"] == "head" and user["team"] != "Клиентский сервис":
+        raise HTTPException(status_code=403, detail="Развитие Magi — зона клиентского сервиса")
+    with get_db() as conn:
+        cutoff = _iso(_now() - timedelta(days=30))
+        acceptance = []
+        for topic in conn.execute("SELECT key, name FROM topics ORDER BY id").fetchall():
+            closed = conn.execute(
+                "SELECT cv.id, cv.resolved_at, cv.client_id FROM conversations cv "
+                "WHERE cv.topic = ? AND cv.mode = 'magi' AND cv.status = 'closed' AND cv.resolved_at >= ?",
+                (topic["key"], cutoff),
+            ).fetchall()
+            reopened = 0
+            for conv in closed:
+                newer = conn.execute(
+                    "SELECT COUNT(*) FROM conversations WHERE client_id = ? AND id != ? AND created_at >= ?",
+                    (conv["client_id"], conv["id"], _iso(_parse(conv["resolved_at"]))),
+                ).fetchone()[0]
+                if newer:
+                    reopened += 1
+            total = len(closed)
+            acceptance.append({
+                "topic": topic["key"], "name": topic["name"],
+                "auto": total, "reopened": reopened,
+                "acceptance_pct": round((total - reopened) / total * 100) if total else None,
+                "manager_answers": conn.execute(
+                    "SELECT COUNT(*) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id "
+                    "WHERE cv.topic = ? AND m.author = 'agent' AND m.created_at >= ?",
+                    (topic["key"], cutoff),
+                ).fetchone()[0],
+            })
+
+        reasons = [dict(r) for r in conn.execute(
+            "SELECT handoff_reason, COUNT(*) AS count FROM conversations "
+            "WHERE handoff_reason IS NOT NULL AND created_at >= ? GROUP BY handoff_reason ORDER BY count DESC LIMIT 5",
+            (cutoff,),
+        ).fetchall()]
+        existing_rules = [r["config"] for r in conn.execute("SELECT config FROM rules WHERE kind = 'trigger'").fetchall()]
+        existing_words = " ".join(str(x) for x in existing_rules).lower()
+        rule_suggestions = []
+        for reason in reasons:
+            words = [w for w in _norm_header(reason["handoff_reason"]).split() if len(w) > 3][:2]
+            if words and all(w in existing_words for w in words):
+                continue
+            rule_suggestions.append({
+                "reason": reason["handoff_reason"], "count": reason["count"], "keywords": words,
+            })
+
+        kb_topics = {row["topic"] for row in conn.execute("SELECT topic FROM kb").fetchall()}
+        kb_suggestions = []
+        for topic in conn.execute("SELECT key, name FROM topics ORDER BY id").fetchall():
+            if topic["key"] in kb_topics:
+                continue
+            sample = conn.execute(
+                "SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id "
+                "WHERE cv.topic = ? AND m.author = 'agent' AND m.created_at >= ? ORDER BY m.id DESC LIMIT 1",
+                (topic["key"], cutoff),
+            ).fetchone()
+            count = conn.execute(
+                "SELECT COUNT(*) FROM messages m JOIN conversations cv ON cv.id = m.conversation_id "
+                "WHERE cv.topic = ? AND m.author = 'agent' AND m.created_at >= ?",
+                (topic["key"], cutoff),
+            ).fetchone()[0]
+            if sample is not None and count >= 2:
+                kb_suggestions.append({
+                    "topic": topic["key"], "name": topic["name"],
+                    "count": count, "sample_answer": sample["body"][:200],
+                })
+        return {"acceptance": acceptance, "rule_suggestions": rule_suggestions, "kb_suggestions": kb_suggestions}
+
+
+class LearningApplyIn(BaseModel):
+    kind: Literal["kb", "rule"]
+    topic: str = Field(default="", max_length=40)
+    reason: str = Field(default="", max_length=200)
+
+
+@app.post("/api/agent/learning/apply")
+def agent_learning_apply(data: LearningApplyIn, user: dict = Depends(require_roles("director", "head"))):
+    if user["role"] == "head" and user["team"] != "Клиентский сервис":
+        raise HTTPException(status_code=403, detail="Развитие Magi — зона клиентского сервиса")
+    with get_db() as conn:
+        if data.kind == "kb":
+            topic = conn.execute("SELECT key, name FROM topics WHERE key = ?", (data.topic,)).fetchone()
+            if topic is None:
+                raise HTTPException(status_code=404, detail="Тема не найдена")
+            sample = conn.execute(
+                "SELECT m.body FROM messages m JOIN conversations cv ON cv.id = m.conversation_id "
+                "WHERE cv.topic = ? AND m.author = 'agent' ORDER BY m.id DESC LIMIT 1",
+                (topic["key"],),
+            ).fetchone()
+            if sample is None:
+                raise HTTPException(status_code=409, detail="Нет ответов менеджеров по теме")
+            conn.execute(
+                "INSERT INTO kb (topic, question, answer, keywords) VALUES (?, ?, ?, ?)",
+                (topic["key"], f"{topic['name']} — как отвечаем?", sample["body"], topic["name"]),
+            )
+            log_audit(conn, user, "kb.grow", "kb", topic["key"], f"Статья из ответов менеджеров: {topic['name']}")
+            return {"ok": True, "topic": topic["key"]}
+        reason = data.reason.strip()
+        if not reason:
+            raise HTTPException(status_code=422, detail="Укажите причину передачи")
+        words = [w for w in _norm_header(reason).split() if len(w) > 3][:2]
+        slug = "_".join(words) or "custom"
+        key = f"trigger.{slug}"
+        exists = conn.execute("SELECT id FROM rules WHERE key = ?", (key,)).fetchone()
+        if exists is None:
+            conn.execute(
+                "INSERT INTO rules (key, title, kind, config, enabled, updated_by, updated_at) VALUES (?, ?, 'trigger', ?, 1, ?, ?)",
+                (key, f"Автоправило: {reason}", json.dumps({"keywords": words}, ensure_ascii=False),
+                 user["id"], _iso(_now())),
+            )
+            log_audit(conn, user, "rules.create", "rule", key, reason)
+            return {"ok": True, "rule": key}
+        raise HTTPException(status_code=409, detail="Такое правило уже есть")
 
 
 @app.get("/api/health")

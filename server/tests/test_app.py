@@ -267,3 +267,135 @@ def test_agent_settings_and_pii_mask():
     assert "145-22-08" not in example["phone"] and "***" in example["phone"]
     assert "kovaleva" not in example["email"] and "@example.by" not in example["email"]
     assert not example["name"].startswith("Мария")
+
+
+# ------------------------------------------------------------------ Telegram/промпты/миграция
+
+def test_dynamic_prompts_cover_all_topics_and_minimal_context():
+    from server.prompts import TASK_PROMPTS, build_context
+    from server.db import TOPICS
+
+    topic_keys = {t[0] for t in TOPICS}
+    assert topic_keys <= set(TASK_PROMPTS.keys()) | {"price_book"} or topic_keys <= set(TASK_PROMPTS.keys())
+
+    client = {"name": "Мария К.", "phone": "+375 XX ***-**-**", "email": "***@***",
+              "city": "Минск", "tags": "VIP", "notes": "день рождения сына"}
+    orders = [{"product": "Фотокнига Premium", "status": "in_production", "promised_at": "2026-11-13T10:00:00Z", "amount": 620}]
+    ctx = build_context("order_status", client, orders, [])
+    assert "последний_заказ" in ctx and ctx["последний_заказ"]["product"] == "Фотокнига Premium"
+    assert "email" not in str(ctx["последний_заказ"]) and "phone" not in str(ctx)
+
+    ctx = build_context("greeting", client, orders, [])
+    assert ctx["заметки"] == "день рождения сына"
+
+
+def test_telegram_ingest_creates_client_and_conversation():
+    import asyncio
+
+    from server.telegram_bot import ingest_telegram_message
+
+    reply = asyncio.run(ingest_telegram_message("999888", "Тест Бот", "testbot", "Сколько стоит фотокнига Premium?"))
+    assert reply and ("620" in reply or "Premium" in reply)
+    with db.get_db() as conn:
+        client = conn.execute("SELECT * FROM clients WHERE tg_handle = '999888'").fetchone()
+        assert client is not None and client["channel"] == "telegram"
+        conv = conn.execute(
+            "SELECT * FROM conversations WHERE client_id = ? AND channel = 'telegram'", (client["id"],)
+        ).fetchone()
+        assert conv is not None and conv["status"] != "closed"
+        conv_id = conv["id"]
+
+    # второе сообщение — тот же диалог, без дублей
+    asyncio.run(ingest_telegram_message("999888", "Тест Бот", "testbot", "А доставка в Гомель сколько идёт?"))
+    with db.get_db() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM conversations WHERE client_id = ? AND channel = 'telegram' AND status != 'closed'",
+            (client["id"],),
+        ).fetchone()[0]
+        assert count == 1
+        authors = [r["author"] for r in conn.execute(
+            "SELECT author FROM messages WHERE conversation_id = ? ORDER BY id", (conv_id,)
+        ).fetchall()]
+        assert authors.count("lead") == 2 and authors.count("magi") == 2
+
+
+def test_telegram_complaint_hands_off_and_manager_reply_goes_to_outbox():
+    import asyncio
+
+    from server.telegram_bot import ingest_telegram_message
+
+    asyncio.run(ingest_telegram_message("777666", "Бот Жалобщик", None, "У вас брак, страница порвана, вернуть деньги!"))
+    with db.get_db() as conn:
+        tg_client = conn.execute("SELECT * FROM clients WHERE tg_handle = '777666'").fetchone()
+        conv = conn.execute(
+            "SELECT * FROM conversations WHERE client_id = ? ORDER BY id DESC LIMIT 1", (tg_client["id"],)
+        ).fetchone()
+        assert conv["mode"] == "human" and conv["handoff_reason"] and conv["summary"]
+        conv_id = conv["id"]
+
+    login("manager@magi.by")
+    response = client.post(f"/api/conversations/{conv_id}/messages",
+                           json={"author": "agent", "body": "Здравствуйте! Разобрались, перепечатаем бесплатно."})
+    assert response.status_code == 200
+    with db.get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM tg_outbox WHERE conversation_id = ? ORDER BY id DESC LIMIT 1", (conv_id,)
+        ).fetchone()
+        assert row is not None and row["sent_at"] is None and "перепечатаем" in row["body"]
+
+
+def test_import_preview_and_apply_dedup():
+    login("director@magi.by")
+    csv_content = (
+        "Имя;Телефон;E-mail;Город;Источник;Комментарий\n"
+        "Импорт Иванов;+375 29 555-00-11;import1@example.by;Минск;bitrix24;из Битрикс24\n"
+        "Импорт Петров;+375 29 555-00-12;import2@example.by;Гомель;bitrix24;\n"
+        "Мария Ковалёва;+375 29 145-22-08;maria.kovaleva@example.by;Минск;bitrix24;уже есть в CRM\n"
+    ).encode("utf-8")
+    preview = client.post("/api/import/preview",
+                          files={"file": ("bitrix24.csv", csv_content, "text/csv")}).json()
+    assert preview["will_create"] == 2 and preview["will_merge"] == 1
+    assert "имя" in " ".join(preview["mapped_columns"].keys()).lower() or preview["mapped_columns"]
+
+    result = client.post("/api/import/apply", files={"file": ("bitrix24.csv", csv_content, "text/csv")}).json()
+    assert result["created"] == 2 and result["merged"] == 1
+
+    # повторный импорт — всё объединяется, дублей нет
+    again = client.post("/api/import/apply", files={"file": ("bitrix24.csv", csv_content, "text/csv")}).json()
+    assert again["created"] == 0 and again["merged"] == 3
+    with db.get_db() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM clients WHERE phone LIKE '%555-00-1%'").fetchone()[0]
+        assert count == 2
+        assert conn.execute("SELECT source FROM clients WHERE phone LIKE '%555-00-11'").fetchone()[0].startswith("import:")
+
+    client.cookies.clear()
+    login("manager@magi.by")
+    assert client.post("/api/import/preview", files={"file": ("x.csv", csv_content, "text/csv")}).status_code == 403
+
+
+def test_learning_loop_grows_kb_and_rules():
+    login("director@magi.by")
+    data = client.get("/api/agent/learning").json()
+    assert "acceptance" in data and len(data["acceptance"]) >= 10
+    assert "rule_suggestions" in data and "kb_suggestions" in data
+
+    # кандидат на статью базы знаний — из реальных ответов менеджеров
+    if data["kb_suggestions"]:
+        target = data["kb_suggestions"][0]
+        applied = client.post("/api/agent/learning/apply", json={"kind": "kb", "topic": target["topic"]}).json()
+        assert applied["ok"] is True
+        with db.get_db() as conn:
+            kb_row = conn.execute("SELECT * FROM kb WHERE topic = ?", (target["topic"],)).fetchone()
+            assert kb_row is not None
+
+    if data["rule_suggestions"]:
+        target = data["rule_suggestions"][0]
+        applied = client.post("/api/agent/learning/apply",
+                              json={"kind": "rule", "reason": target["reason"]}).json()
+        assert applied["ok"] is True
+        with db.get_db() as conn:
+            rule = conn.execute("SELECT * FROM rules WHERE key = ?", (applied["rule"],)).fetchone()
+            assert rule is not None and rule["kind"] == "trigger" and rule["enabled"] == 1
+
+    audit_actions = [r["action"] for r in client.get("/api/audit").json()["items"]]
+    assert "kb.grow" in audit_actions or "rules.create" in audit_actions

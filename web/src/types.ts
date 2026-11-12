@@ -395,3 +395,35 @@ export interface PickupItem {
   client_name: string;
   client_id: number;
 }
+
+export interface LearningAcceptance {
+  topic: string;
+  name: string;
+  auto: number;
+  reopened: number;
+  acceptance_pct: number | null;
+  manager_answers: number;
+}
+
+export interface LearningPayload {
+  acceptance: LearningAcceptance[];
+  rule_suggestions: { reason: string; count: number; keywords: string[] }[];
+  kb_suggestions: { topic: string; name: string; count: number; sample_answer: string }[];
+}
+
+export interface ImportReport {
+  total_rows: number;
+  mapped_columns: Record<string, string>;
+  unmapped_columns: string[];
+  will_create: number;
+  will_merge: number;
+  issues: string[];
+  filename: string;
+}
+
+export interface ImportApplyResult {
+  created: number;
+  merged: number;
+  skipped: number;
+  report: ImportReport;
+}

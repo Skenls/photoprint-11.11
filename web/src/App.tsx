@@ -23,10 +23,11 @@ import { Hr } from "./pages/Hr";
 import { AnalystPage } from "./pages/AnalystPage";
 import { Decisions } from "./pages/Decisions";
 import { Rules } from "./pages/Rules";
+import { Import } from "./pages/Import";
 
 type Page =
   | "dashboard" | "pulse" | "inbox" | "clients" | "magi" | "audit"
-  | "production" | "finance" | "hr" | "analyst" | "decisions" | "rules";
+  | "production" | "finance" | "hr" | "analyst" | "decisions" | "rules" | "import";
 
 interface NavItem {
   page: Page;
@@ -48,6 +49,7 @@ const NAV: NavItem[] = [
   { page: "clients", label: "Клиенты", icon: IconUsers, show: (u) => isDirector(u) || u.team === "Клиентский сервис" },
   { page: "magi", label: "Magi", icon: IconSpark, show: (u) => isDirector(u) || u.team === "Клиентский сервис" },
   { page: "rules", label: "Конструктор", icon: IconSpark, show: (u) => isDirector(u) || (u.role === "head" && u.team === "Клиентский сервис") },
+  { page: "import", label: "Миграция", icon: IconUsers, show: isDirector },
   { page: "production", label: "Производство", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Производство")(u) },
   { page: "finance", label: "Финансы", icon: IconChart, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Финансы и люди")(u) },
   { page: "hr", label: "Люди", icon: IconUsers, show: (u) => isDirector(u) || isAnalyst(u) || headOf("Финансы и люди")(u) },
@@ -69,12 +71,13 @@ const TITLES: Record<Page, string> = {
   analyst: "Аналитика источников",
   decisions: "Реестр решений",
   rules: "Magi Конструктор правил",
+  import: "Миграция клиентов",
 };
 
 function parseHash(): { page: Page; param: string } {
   const raw = window.location.hash.replace(/^#\/?/, "");
   const [page, param = ""] = raw.split("/");
-  const known: Page[] = ["dashboard", "pulse", "inbox", "clients", "magi", "audit", "production", "finance", "hr", "analyst", "decisions", "rules"];
+  const known: Page[] = ["dashboard", "pulse", "inbox", "clients", "magi", "audit", "production", "finance", "hr", "analyst", "decisions", "rules", "import"];
   return { page: (known.includes(page as Page) ? page : "dashboard") as Page, param };
 }
 
@@ -240,6 +243,7 @@ export default function App() {
           {page === "rules" && (
             <Rules canEdit={user.role === "director" || (user.role === "head" && user.team === "Клиентский сервис")} />
           )}
+          {page === "import" && <Import />}
           {page === "production" && <Production />}
           {page === "finance" && <Finance />}
           {page === "hr" && <Hr />}
