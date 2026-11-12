@@ -49,6 +49,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.middleware("http")
+async def no_html_cache(request: Request, call_next):
+    # index.html без кеша: после новой сборки браузер сразу видит свежий UI
+    response = await call_next(request)
+    if response.headers.get("content-type", "").startswith("text/html"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
 CHANNELS = ["site", "telegram", "email", "instagram"]
 STATUSES = ["new", "qualified", "customer", "sleeping"]
 CHANNEL_LABELS = {"site": "Сайт", "telegram": "Telegram", "email": "Почта", "instagram": "Instagram"}

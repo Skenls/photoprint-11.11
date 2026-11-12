@@ -2266,6 +2266,7 @@ h2 {
 .inbox {
   display: grid;
   grid-template-columns: minmax(260px, 300px) minmax(0, 1fr) minmax(250px, 292px);
+  grid-template-rows: minmax(0, 1fr);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -2490,6 +2491,7 @@ h2 {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--surface);
 }
 
@@ -2794,6 +2796,7 @@ h2 {
   border-left: 1px solid var(--line);
   overflow-y: auto;
   overflow-x: hidden;
+  min-height: 0;
   background: var(--surface-2);
 }
 
@@ -2828,8 +2831,8 @@ h2 {
   text-overflow: ellipsis;
 }
 
-.context-title span,
-.context-client-main span {
+.context-title span:not(.avatar),
+.context-client-main span:not(.avatar) {
   display: block;
   margin-top: 3px;
   font-size: 11px;
@@ -3426,6 +3429,7 @@ h2 {
 
   .inbox {
     grid-template-columns: 1fr;
+    grid-template-rows: none;
     height: auto;
     min-height: 0;
   }
