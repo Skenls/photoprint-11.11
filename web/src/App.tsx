@@ -18,7 +18,7 @@ import { Magi } from "./pages/Magi";
 import { Audit } from "./pages/Audit";
 import { Pulse } from "./pages/Pulse";
 import { Production } from "./pages/Production";
-import { Finance } from "./pages/Finance";
+import { Accounting } from "./pages/Accounting";
 import { Hr } from "./pages/Hr";
 import { AnalystPage } from "./pages/AnalystPage";
 import { Decisions } from "./pages/Decisions";
@@ -66,7 +66,7 @@ const TITLES: Record<Page, string> = {
   magi: "Magi",
   audit: "Журнал действий",
   production: "Производство и качество",
-  finance: "Финансы (1С)",
+  finance: "Бухгалтерия",
   hr: "Люди (HR)",
   analyst: "Аналитика источников",
   decisions: "Реестр решений",
@@ -245,7 +245,7 @@ export default function App() {
           )}
           {page === "import" && <Import />}
           {page === "production" && <Production />}
-          {page === "finance" && <Finance />}
+          {page === "finance" && <Accounting user={user} />}
           {page === "hr" && <Hr />}
           {page === "analyst" && <AnalystPage />}
           {page === "decisions" && <Decisions user={user} />}

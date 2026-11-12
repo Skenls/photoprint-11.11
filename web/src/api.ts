@@ -127,7 +127,30 @@ export const api = {
   users: () => request<{ items: { id: number; name: string; role: string; team: string; title: string }[] }>("/users"),
   resetDemo: () => request<{ ok: boolean }>("/demo/reset", { method: "POST" }),
   pulse: () => request<PulsePayload>("/pulse"),
-  sales: () => request<SalesPayload>("/sales"),
+  accounting: () => request<import("./types").AccountingPayload>("/accounting"),
+  accountingOsv: (from: string, to: string) =>
+    request<import("./types").OsvPayload>(`/accounting/osv?from_date=${from}&to_date=${to}`),
+  accountingStorno: (txId: number, reason: string) =>
+    request<{ ok: boolean }>("/accounting/storno", { method: "POST", body: JSON.stringify({ tx_id: txId, reason }) }),
+  accountingImportStatement: (text: string) =>
+    request<{ duplicate: boolean; message?: string; matched: number; unmatched: number }>(
+      "/accounting/import-statement",
+      { method: "POST", body: JSON.stringify({ text }) },
+    ),
+  accountingPostBank: (lineIds: number[]) =>
+    request<{ posted: number }>("/accounting/bank/post", {
+      method: "POST",
+      body: JSON.stringify({ line_ids: lineIds }),
+    }),
+  accountingCreateDocument: (kind: string, orderId: number) =>
+    request<{ id: number; number: string }>("/accounting/documents", {
+      method: "POST",
+      body: JSON.stringify({ kind, order_id: orderId }),
+    }),
+  accountingReconciliation: (params: { counterparty_id?: number; client_id?: number }) =>
+    request<{ name: string; items: { date: string; number: string; description: string; debit: number; credit: number; balance: number }[]; closing: number }>(
+      `/accounting/reconciliation${params.counterparty_id ? `?counterparty_id=${params.counterparty_id}` : `?client_id=${params.client_id ?? 0}`}`,
+    ),  sales: () => request<SalesPayload>("/sales"),
   production: () => request<ProductionPayload>("/production"),
   causeOrders: (cause: string) =>
     request<{ cause: string; items: (import("./types").Order & { client_name: string; owner_name: string })[] }>(

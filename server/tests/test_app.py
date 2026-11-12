@@ -627,3 +627,123 @@ def test_openai_two_step_prompt_selection(monkeypatch):
 
     # без ключа модель недоступна → None, движок уходит в оффлайн-правила
     assert asyncio.run(magi.classify_topic("привет")) is None
+
+
+def test_accounting_ledger_invariant_and_reports():
+    """Ядро двойной записи: баланс сходится, ОСВ симметрична, P&L считается."""
+    from server import accounting as acc
+
+    login("director@magi.by")
+    data = client.get("/api/accounting").json()
+    assert data["balanced"] is True
+    assert abs(data["osv_totals"]["assets"] - data["osv_totals"]["passives"]) < 0.01
+    assert data["pnl"], "P&L пуст"
+    assert any(m["revenue"] > 0 for m in data["pnl"])
+
+    # ОСВ: Дт обороты = Кт обороты, все счета типовой цепочки задействованы
+    osv = client.get("/api/accounting/osv", params={"from_date": "2000-01-01", "to_date": "2099-12-31"}).json()
+    assert osv["balanced"] is True
+    codes_debit = {r["code"] for r in osv["rows"] if r["debit"] > 0}
+    codes_credit = {r["code"] for r in osv["rows"] if r["credit"] > 0}
+    assert {"57", "51", "62", "90.2", "43", "20", "26"} <= codes_debit
+    assert {"62", "90.1", "43", "20", "10", "60"} <= codes_credit
+
+    # аномалий в сиде нет (cost < amount у всех заказов)
+    assert client.get("/api/accounting").json()["anomalies"] == []
+
+
+def test_accounting_storno_restores_balance():
+    """Сторно: зеркальная проводка, исходная строка не удаляется, баланс сходится."""
+    from server import accounting as acc
+
+    login("director@magi.by")
+    data = client.get("/api/accounting").json()
+    target = next(t for t in data["transactions"] if t["doc_type"] == "order_delivered")
+
+    response = client.post("/api/accounting/storno", json={"tx_id": target["id"], "reason": "Ошибка"})
+    assert response.status_code == 200, response.text
+    after = client.get("/api/accounting").json()
+    assert after["balanced"] is True
+
+    # повторное сторно запрещено
+    assert client.post("/api/accounting/storno", json={"tx_id": target["id"], "reason": "ещё раз"}).status_code == 422
+
+    # оператор не может сторнировать
+    client.cookies.clear()
+    login("manager@magi.by")
+    assert client.post("/api/accounting/storno", json={"tx_id": target["id"], "reason": "x"}).status_code == 403
+
+
+def test_bank_statement_import_and_reconcile():
+    """Импорт выписки: парсер 1CClientBankExchange, дедуп, матчинг заказа, разнесение Дт 51 Кт 62."""
+    statement = """1CClientBankExchange
+ВерсияФормата=1.01
+СекцияРасчСчет=BY17BLBB30150001000123456789
+НачальныйОстаток=25000.00
+СекцияДокумент=Платежное поручение
+Номер=1184
+Дата=10.11.2026
+Сумма=350.00
+Плательщик=Ковалева Мария
+Получатель=ООО "Фотопринт", УНП 190000000
+НазначениеПлатежа=Оплата заказа #21 фотокнига
+КонецДокумента
+СекцияДокумент=Платежное поручение
+Номер=1185
+Дата=10.11.2026
+Сумма=120.00
+Плательщик=Неизвестный платеж
+Получатель=ООО "Фотопринт", УНП 190000000
+НазначениеПлатежа=Оплата без номера заказа
+КонецДокумента
+"""
+    login("director@magi.by")
+    result = client.post("/api/accounting/import-statement", json={"text": statement}).json()
+    assert result["duplicate"] is False
+    assert result["matched"] == 1 and result["unmatched"] == 1
+
+    # дедуп: повторный импорт той же выписки
+    dup = client.post("/api/accounting/import-statement", json={"text": statement}).json()
+    assert dup["duplicate"] is True
+
+    # разнесение сопоставленной строки
+    data = client.get("/api/accounting").json()
+    matched = [l for l in data["bank_lines"] if l["status"] == "matched"]
+    assert matched, "строка с заказом не нашлась"
+    posted = client.post("/api/accounting/bank/post", json={"line_ids": [l["id"] for l in matched]}).json()
+    assert posted["posted"] == 1
+    # строка ушла из pending, в журнале появилась bank_payment
+    data = client.get("/api/accounting").json()
+    assert all(l["status"] != "matched" for l in data["bank_lines"])
+
+    # оператор не импортирует выписки
+    client.cookies.clear()
+    login("manager@magi.by")
+    assert client.post("/api/accounting/import-statement", json={"text": statement}).status_code == 403
+
+
+def test_accounting_documents_and_reconciliation():
+    """Первичка: счёт по заказу с НДС 20% + акт сверки по контрагенту."""
+    from server import accounting as acc
+
+    login("director@magi.by")
+    order_ref = next(t["doc_id"] for t in client.get("/api/accounting").json()["transactions"]
+                     if t["doc_id"] and t["doc_id"].startswith("order:"))
+    order_pk = int(order_ref.split(":")[1])
+
+    doc = client.post("/api/accounting/documents", json={"kind": "invoice", "order_id": order_pk}).json()
+    assert doc["number"].startswith("SCH-"), doc
+
+    printed = client.get(f"/api/accounting/documents/{doc['id']}/print")
+    assert printed.status_code == 200 and "Фотопринт" in printed.text
+
+    with db.get_db() as conn:
+        cp = conn.execute("SELECT id FROM counterparties LIMIT 1").fetchone()[0]
+    rec = client.get("/api/accounting/reconciliation", params={"counterparty_id": cp}).json()
+    assert "name" in rec and "closing" in rec
+
+    # аналитик читает, но не создаёт документы
+    client.cookies.clear()
+    login("analyst@magi.by")
+    assert client.get("/api/accounting").status_code == 200
+    assert client.post("/api/accounting/documents", json={"kind": "invoice", "order_id": order_pk}).status_code == 403

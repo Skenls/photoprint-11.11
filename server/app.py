@@ -1320,6 +1320,145 @@ def cause_orders(cause: str, user: dict = Depends(require_teams("Произво�
 
 # ------------------------------------------------------------------------ finance
 
+from . import accounting as acc
+from .auth import require_teams  # noqa: E402  (единая точка доступа к финансам)
+
+
+@app.get("/api/accounting")
+def accounting_overview(user: dict = Depends(require_teams("Финансы и люди"))):
+    """Обзор: план счетов, сальдо, P&L/БДДС в реальном времени, задолженность, аномалии."""
+    with get_db() as conn:
+        ledger = acc.ensure_demo_ledger(conn)
+        osv = acc.osv(conn, "0000-01-01", "9999-12-31")
+        pnl = acc.pnl_and_cashflow(conn)
+        aging = acc.aging(conn)
+        anomalies = acc.auditor(conn)
+        txs = [dict(r) for r in conn.execute(
+            "SELECT t.*, u.name AS author FROM acc_transactions t LEFT JOIN users u ON u.id = t.created_by "
+            "WHERE t.is_posted = 1 ORDER BY t.id DESC LIMIT 30"
+        ).fetchall()]
+        docs = [dict(r) for r in conn.execute(
+            "SELECT d.id, d.kind, d.number, d.date, d.total_amount, d.vat_amount, d.status, "
+            "o.product FROM acc_documents d LEFT JOIN orders o ON o.id = d.order_id "
+            "ORDER BY d.id DESC LIMIT 20"
+        ).fetchall()]
+        bank_lines = [dict(r) for r in conn.execute(
+            "SELECT id, doc_number, doc_date, amount, payer, purpose, matched_order_id, status "
+            "FROM acc_bank_lines WHERE status != 'posted' ORDER BY id DESC LIMIT 50"
+        ).fetchall()]
+        return {
+            "ledger": ledger,
+            "accounts": [{"code": r["code"], "name": r["name"], "type": r["type"],
+                          "closing": next((x["closing"] for x in osv["rows"] if x["code"] == r["code"]), 0)}
+                         for r in conn.execute("SELECT * FROM acc_accounts ORDER BY code")],
+            "osv_totals": osv["totals"], "balanced": osv["balanced"],
+            "pnl": pnl["months"], "aging": aging, "anomalies": anomalies,
+            "transactions": txs, "documents": docs, "bank_lines": bank_lines,
+        }
+
+
+@app.get("/api/accounting/osv")
+def accounting_osv(from_date: str = Query(default="", max_length=10), to_date: str = Query(default="", max_length=10),
+                   user: dict = Depends(require_teams("Финансы и люди"))):
+    """ОСВ за произвольный период."""
+    with get_db() as conn:
+        acc.seed_accounts(conn)
+        date_from = from_date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", from_date or "") else "0000-01-01"
+        date_to = to_date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", to_date or "") else "9999-12-31"
+        return acc.osv(conn, date_from, date_to)
+
+
+@app.post("/api/accounting/storno")
+def accounting_storno(data: dict, user: dict = Depends(require_teams("Финансы и люди"))):
+    if user["role"] not in ("director", "head"):
+        raise HTTPException(status_code=403, detail="Сторно — только руководству")
+    tx_id = int(data.get("tx_id", 0))
+    reason = str(data.get("reason", "")).strip() or "Исправление ошибки"
+    with get_db() as conn:
+        try:
+            storno_id = acc.storno(conn, tx_id, created_by=user["id"], reason=reason)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        log_audit(conn, user, "accounting.storno", "acc_transaction", tx_id, reason)
+        return {"ok": True, "storno_id": storno_id}
+
+
+@app.post("/api/accounting/import-statement")
+def accounting_import_statement(data: dict, user: dict = Depends(require_teams("Финансы и люди"))):
+    """Импорт выписки Клиент-Банка: разбор, дедуп по хэшу, авто-сопоставление оплат с заказами."""
+    if user["role"] not in ("director", "head"):
+        raise HTTPException(status_code=403, detail="Импорт выписки — только руководству")
+    text = str(data.get("text", ""))
+    if len(text) < 40:
+        raise HTTPException(status_code=422, detail="Пустая или слишком короткая выписка")
+    with get_db() as conn:
+        result = acc.import_statement(conn, text, created_by=user["id"])
+        if result["duplicate"]:
+            return {"duplicate": True, "message": "Эта выписка уже импортирована (защита по хэшу файла)"}
+        log_audit(conn, user, "accounting.statement_import", "system", None,
+                  f"matched={result['matched']} unmatched={result['unmatched']}")
+        return result
+
+
+@app.post("/api/accounting/bank/post")
+def accounting_post_bank(data: dict, user: dict = Depends(require_teams("Финансы и люди"))):
+    if user["role"] not in ("director", "head"):
+        raise HTTPException(status_code=403, detail="Разнесение — только руководству")
+    line_ids = [int(x) for x in (data.get("line_ids") or [])]
+    with get_db() as conn:
+        result = acc.post_bank_lines(conn, line_ids, created_by=user["id"])
+        log_audit(conn, user, "accounting.bank_post", "system", None, f"posted={result['posted']}")
+        return result
+
+
+@app.post("/api/accounting/documents")
+def accounting_create_document(data: dict, user: dict = Depends(require_teams("Финансы и люди"))):
+    if user["role"] not in ("director", "head"):
+        raise HTTPException(status_code=403, detail="Документы — только руководству")
+    kind = str(data.get("kind", "invoice"))
+    if kind not in ("invoice", "act", "ttn"):
+        raise HTTPException(status_code=422, detail="Неизвестный тип документа")
+    order_id = int(data.get("order_id", 0))
+    with get_db() as conn:
+        where, params = client_scope(user, "c")
+        allowed = conn.execute(
+            f"SELECT 1 FROM orders o JOIN clients c ON c.id = o.client_id WHERE o.id = ? AND {where}",
+            [order_id, *params],
+        ).fetchone()
+        if not allowed:
+            raise HTTPException(status_code=404, detail="Заказ не найден")
+        try:
+            doc = acc.create_document(conn, kind, order_id)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        log_audit(conn, user, "accounting.document", "acc_document", doc["id"], f"{kind} {doc['number']}")
+        return doc
+
+
+@app.get("/api/accounting/documents/{doc_id}/print")
+def accounting_print_document(doc_id: int):
+    """Печатная форма счёта/акта/ТН (HTML → печать в PDF из браузера). Публично по id для демо."""
+    with get_db() as conn:
+        row = conn.execute("SELECT body_html FROM acc_documents WHERE id = ?", (doc_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    return Response(content=row["body_html"], media_type="text/html; charset=utf-8")
+
+
+@app.get("/api/accounting/reconciliation")
+def accounting_reconciliation(counterparty_id: int = 0, client_id: int = 0,
+                              user: dict = Depends(require_teams("Финансы и люди"))):
+    with get_db() as conn:
+        try:
+            return acc.reconciliation(
+                conn,
+                counterparty_id=counterparty_id or None,
+                client_id=client_id or None,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+
 @app.get("/api/finance")
 def finance(user: dict = Depends(require_teams("Финансы и люди"))):
     with get_db() as conn:

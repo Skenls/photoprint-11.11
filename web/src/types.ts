@@ -317,6 +317,31 @@ export interface FinancePayload {
   counterparties: Counterparty[];
 }
 
+export interface AccountingPayload {
+  ledger: { orders_posted: number; period_posted: number };
+  accounts: { code: string; name: string; type: string; closing: number }[];
+  osv_totals: { opening: number; debit: number; credit: number; closing: number; assets: number; passives: number };
+  balanced: boolean;
+  pnl: {
+    month: string; revenue: number; cogs: number; fees: number; overhead: number;
+    profit: number; margin: number; cash_in: number; cash_out: number; net_cash: number;
+  }[];
+  aging: {
+    receivables: { id: number; name: string; balance: number; bucket: string }[];
+    payables: { id: number; name: string; balance: number; bucket: string }[];
+  };
+  anomalies: { kind: string; severity: string; text: string }[];
+  transactions: { id: number; number: string; doc_type: string; doc_id: string | null; date: string; description: string; author: string | null }[];
+  documents: { id: number; kind: string; number: string; date: string; total_amount: number; vat_amount: number; status: string; product: string | null }[];
+  bank_lines: { id: number; doc_number: string; doc_date: string; amount: number; payer: string; purpose: string; matched_order_id: number | null; status: string }[];
+}
+
+export interface OsvPayload {
+  rows: { code: string; name: string; type: string; opening: number; debit: number; credit: number; closing: number }[];
+  totals: { opening: number; debit: number; credit: number; closing: number; assets: number; passives: number };
+  balanced: boolean;
+}
+
 export interface HrPayload {
   teams: { team: string; staff: number; active: number }[];
   vacancies: { id: number; team: string; position: string; opened_at: string; candidates: number; status: string }[];

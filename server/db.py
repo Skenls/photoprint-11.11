@@ -330,6 +330,84 @@ CREATE TABLE IF NOT EXISTS tg_outbox (
     sent_at TEXT
 );
 
+-- Встроенная бухгалтерия (Magi Finance) вместо 1С-коннектора: двойная запись, только сторно.
+CREATE TABLE IF NOT EXISTS acc_accounts (
+    code TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('asset', 'liability', 'revenue', 'expense')),
+    is_active INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS acc_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    number TEXT NOT NULL UNIQUE,
+    doc_type TEXT NOT NULL,
+    doc_id TEXT,
+    date TEXT NOT NULL,
+    description TEXT NOT NULL,
+    is_posted INTEGER NOT NULL DEFAULT 1,
+    storno_of_id INTEGER REFERENCES acc_transactions(id),
+    created_by INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acc_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id INTEGER NOT NULL REFERENCES acc_transactions(id),
+    account_debit TEXT NOT NULL REFERENCES acc_accounts(code),
+    account_credit TEXT NOT NULL REFERENCES acc_accounts(code),
+    amount REAL NOT NULL CHECK (amount > 0),
+    currency TEXT NOT NULL DEFAULT 'BYN',
+    counterparty_id INTEGER REFERENCES counterparties(id),
+    client_id INTEGER REFERENCES clients(id),
+    order_id INTEGER REFERENCES orders(id),
+    cost_center TEXT,
+    note TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS acc_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL CHECK (kind IN ('invoice', 'act', 'ttn')),
+    number TEXT NOT NULL UNIQUE,
+    date TEXT NOT NULL,
+    order_id INTEGER REFERENCES orders(id),
+    counterparty_id INTEGER REFERENCES counterparties(id),
+    total_amount REAL NOT NULL,
+    vat_amount REAL NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'issued', 'cancelled')),
+    body_html TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acc_bank_statements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_date TEXT NOT NULL,
+    raw_hash TEXT NOT NULL UNIQUE,
+    total_inflow REAL NOT NULL DEFAULT 0,
+    total_outflow REAL NOT NULL DEFAULT 0,
+    imported_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS acc_bank_lines (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    statement_hash TEXT NOT NULL,
+    doc_number TEXT NOT NULL,
+    doc_date TEXT NOT NULL,
+    amount REAL NOT NULL,
+    payer TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    matched_order_id INTEGER REFERENCES orders(id),
+    matched_client_id INTEGER REFERENCES clients(id),
+    status TEXT NOT NULL DEFAULT 'unmatched' CHECK (status IN ('matched', 'unmatched', 'posted')),
+    posted_tx_id INTEGER,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_acc_entries_debit ON acc_entries(account_debit);
+CREATE INDEX IF NOT EXISTS idx_acc_entries_credit ON acc_entries(account_credit);
+CREATE INDEX IF NOT EXISTS idx_acc_entries_order ON acc_entries(order_id);
+CREATE INDEX IF NOT EXISTS idx_acc_tx_date ON acc_transactions(date, is_posted);
+
 CREATE INDEX IF NOT EXISTS idx_tg_outbox_pending ON tg_outbox(sent_at);
 
 CREATE INDEX IF NOT EXISTS idx_clients_owner ON clients(owner_id);
@@ -371,8 +449,13 @@ def init_db() -> None:
     with get_db() as conn:
         conn.executescript(SCHEMA)
         _migrate(conn)
+        from .accounting import ensure_demo_ledger, seed_accounts
+
+        seed_accounts(conn)
         if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             seed(conn)
+        # Демо-проводки: завершённые заказы + расходы месяцев (идемпотентно).
+        ensure_demo_ledger(conn)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
