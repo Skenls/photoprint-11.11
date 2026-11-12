@@ -1,0 +1,461 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Magi — главное · PicPac</title>
+<style>
+  :root {
+    --red: #DD5757;
+    --red-deep: #C64545;
+    --ink: #364C49;
+    --paper: #F6EFE6;
+    --paper-2: #FFF9E3;
+    --lemon: #FFE669;
+    --green: #7AA45A;
+    --mut: rgba(54, 76, 73, .58);
+    --line: rgba(54, 76, 73, .14);
+    --font: "Futura PT", "Futura", "Avenir Next", "Avenir", system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: var(--font);
+    background: var(--ink);
+    color: var(--ink);
+    overflow: hidden;
+  }
+  .deck { width: 100vw; height: 100vh; position: relative; }
+  .slide {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 5vh 6vw 4.5vh;
+    background: var(--paper);
+    opacity: 0;
+    visibility: hidden;
+    overflow: hidden;
+    transition: opacity .35s ease, visibility .35s;
+  }
+  .slide.on { opacity: 1; visibility: visible; }
+  .slide.dark { background: var(--ink); color: var(--paper); }
+  .slide.red { background: var(--red); color: #fff; }
+  .kicker {
+    font-size: clamp(11px, .8vw, 15px);
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--mut);
+    font-weight: 600;
+  }
+  .slide.dark .kicker { color: rgba(246, 239, 230, .55); }
+  .slide.red .kicker { color: rgba(255, 255, 255, .7); }
+  .mid { margin-top: auto; margin-bottom: auto; }
+  h1 {
+    font-size: clamp(56px, 9.5vw, 168px);
+    line-height: .94;
+    letter-spacing: -.03em;
+    font-weight: 700;
+    text-wrap: balance;
+  }
+  h2 {
+    font-size: clamp(40px, 6.4vw, 112px);
+    line-height: 1.02;
+    letter-spacing: -.025em;
+    font-weight: 700;
+    text-wrap: balance;
+    max-width: 16em;
+  }
+  .sub {
+    margin-top: 3.2vh;
+    font-size: clamp(18px, 1.7vw, 32px);
+    line-height: 1.35;
+    color: var(--mut);
+    max-width: 30em;
+  }
+  .slide.dark .sub { color: rgba(246, 239, 230, .66); }
+  .slide.red .sub { color: rgba(255, 255, 255, .85); }
+  .red-t { color: var(--red); }
+  .slide.dark .red-t, .slide.red .red-t { color: var(--lemon); }
+  .giant {
+    font-size: clamp(90px, 15vw, 260px);
+    line-height: .9;
+    font-weight: 700;
+    letter-spacing: -.04em;
+  }
+  .giant small { font-size: .26em; letter-spacing: -.01em; font-weight: 600; }
+  .row {
+    display: flex;
+    gap: 2.6vw;
+    margin-top: 4.5vh;
+    flex-wrap: wrap;
+  }
+  .chip {
+    padding: 1.4vh 1.6vw;
+    border: 1.5px solid var(--line);
+    border-radius: 999px;
+    font-size: clamp(15px, 1.2vw, 23px);
+    font-weight: 600;
+    color: var(--ink);
+    background: rgba(255, 255, 255, .5);
+    white-space: nowrap;
+  }
+  .slide.dark .chip {
+    border-color: rgba(246, 239, 230, .22);
+    background: rgba(246, 239, 230, .06);
+    color: var(--paper);
+  }
+  .slide.red .chip {
+    border-color: rgba(255, 255, 255, .4);
+    background: rgba(255, 255, 255, .1);
+    color: #fff;
+  }
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 1.4vw;
+    margin-top: 4.5vh;
+    font-size: clamp(20px, 2vw, 38px);
+    font-weight: 600;
+  }
+  .flow .sep { color: var(--red); font-weight: 400; }
+  .slide.dark .flow .sep { color: var(--lemon); }
+  .foot {
+    margin-top: auto;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 20px;
+    font-size: clamp(10px, .75vw, 14px);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--mut);
+  }
+  .slide.dark .foot { color: rgba(246, 239, 230, .45); }
+  .slide.red .foot { color: rgba(255, 255, 255, .65); }
+  .blob {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(70px);
+    pointer-events: none;
+  }
+  .b-red { width: 34vw; height: 34vw; background: rgba(221, 87, 87, .34); }
+  .b-lemon { width: 22vw; height: 22vw; background: rgba(255, 230, 105, .55); }
+  .b-green { width: 26vw; height: 26vw; background: rgba(122, 164, 90, .25); }
+  .corner-tr { top: -12vw; right: -10vw; }
+  .corner-bl { bottom: -13vw; left: -11vw; }
+
+  .bar {
+    position: fixed;
+    left: 0;
+    bottom: 0;
+    height: 4px;
+    background: var(--red);
+    width: 0;
+    z-index: 20;
+    transition: width .3s ease;
+  }
+  .hud {
+    position: fixed;
+    right: 1.4vw;
+    top: 1.4vh;
+    z-index: 20;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    font-size: 11px;
+    color: rgba(54, 76, 73, .45);
+    mix-blend-mode: multiply;
+  }
+  .hud .timer {
+    font-variant-numeric: tabular-nums;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    display: none;
+  }
+  .hud .timer.show { display: inline; }
+  .hud .timer.hot { color: var(--red); border-color: var(--red); }
+  .notes {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    background: rgba(54, 76, 73, .96);
+    color: var(--paper);
+    padding: 18px 3vw 22px;
+    font-size: 15px;
+    line-height: 1.5;
+    display: none;
+    max-height: 32vh;
+    overflow-y: auto;
+  }
+  .notes.show { display: block; }
+  .notes b {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 11px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--lemon);
+  }
+  .hint {
+    position: fixed;
+    left: 1.4vw;
+    bottom: 1.2vh;
+    z-index: 20;
+    font-size: 10px;
+    letter-spacing: .08em;
+    color: rgba(54, 76, 73, .38);
+    text-transform: uppercase;
+  }
+  .progress-num {
+    position: fixed;
+    right: 1.4vw;
+    bottom: 1.2vh;
+    z-index: 20;
+    font-size: 10px;
+    letter-spacing: .1em;
+    color: rgba(54, 76, 73, .38);
+    font-variant-numeric: tabular-nums;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .slide { transition: none; }
+  }
+  @media (max-width: 900px) {
+    .slide { padding: 4vh 6vw; }
+    h1 { font-size: 15vw; }
+    h2 { font-size: 10.5vw; }
+    .giant { font-size: 24vw; }
+    .row { gap: 10px; }
+  }
+  @media print {
+    @page { size: 13.333in 7.5in; margin: 0; }
+    body { overflow: visible; background: #fff; }
+    .deck { height: auto; }
+    .slide {
+      position: relative;
+      opacity: 1 !important;
+      visibility: visible !important;
+      width: 13.333in;
+      height: 7.5in;
+      page-break-after: always;
+      padding: .47in .85in .42in;
+      transition: none;
+    }
+    .hud, .hint, .bar, .notes, .progress-num { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="deck" id="deck">
+
+<section class="slide" data-notes="Приветствие. Magi — единая система управления обещанием для PicPac: 400 000 фотокниг в год, цикл один день, 300 сотрудников.">
+  <div class="blob b-red corner-tr"></div>
+  <div class="blob b-lemon corner-bl"></div>
+  <div class="kicker">Space Hackathon 2026 · Трек 1</div>
+  <div class="mid">
+    <h1>Пульт управления<br>обещанием.</h1>
+    <p class="sub">CRM + производство + финансы + HR — один контур с ИИ для PicPac.</p>
+  </div>
+  <div class="foot"><span>PicPac × Magi</span><span>3 минуты · 12 слайдов</span></div>
+</section>
+
+<section class="slide dark" data-notes="400 000 заказов в год, производство за один день, пять разрозненных систем. 3–4% заказов опаздывают — это 16 000 сорванных праздников. Коробка не успевает за циклом.">
+  <div class="kicker">Проблема</div>
+  <div class="mid">
+    <h2>5 систем. 1 день.<br>Любая ошибка — <span class="red-t">сорванный праздник.</span></h2>
+    <p class="sub">3–4% заказов опаздывают. Это 16 000 праздников в год.</p>
+  </div>
+  <div class="foot"><span>400 000 заказов в год</span><span>Источник: данные заказчика</span></div>
+</section>
+
+<section class="slide" data-notes="Битрикс24 — про сделки и воронки. Наши сценарии другие: правила меняются за минуты без интегратора, ИИ видит заказ и цены, финансы встроены, а не в отдельной 1С. Отчёт в 1С — 3–4 часа, здесь — секунды.">
+  <div class="kicker">Почему не Битрикс24</div>
+  <div class="mid">
+    <h2>Коробка — про сделки.<br>Мы — про <span class="red-t">обещание.</span></h2>
+    <p class="sub">Правила — за минуты. ИИ знает заказ. Финансы — внутри.</p>
+    <div class="row">
+      <span class="chip">Недели → минуты</span>
+      <span class="chip">Отчёт 3–4 ч → секунды</span>
+      <span class="chip">Чат-бот → Magi с данными</span>
+    </div>
+  </div>
+  <div class="foot"><span>Сравнение по сценариям заказчика</span><span></span></div>
+</section>
+
+<section class="slide dark" data-notes="Мы заменили пять систем одним контуром: CRM, производство, финансы, HR. Всё связано сквозными идентификаторами клиента и заказа.">
+  <div class="kicker">Наше отличие</div>
+  <div class="mid">
+    <h2>Один контур<br>вместо пяти.</h2>
+    <div class="row">
+      <span class="chip">CRM</span>
+      <span class="chip">Производство</span>
+      <span class="chip">Финансы</span>
+      <span class="chip">HR</span>
+    </div>
+  </div>
+  <div class="foot"><span>Сквозные ID: клиент · заказ</span><span></span></div>
+</section>
+
+<section class="slide" data-notes="Заказ проходит путь от оплаты до ПВЗ, и каждая система видит один и тот же заказ целиком. Роли и скоупы проверяются на сервере: директор, руководитель отдела, оператор, аналитик.">
+  <div class="kicker">Сквозной процесс</div>
+  <div class="mid">
+    <h2>Заказ виден всем.<br>Целиком.</h2>
+    <div class="flow">
+      <span>Заказ</span><span class="sep">→</span>
+      <span>Цех</span><span class="sep">→</span>
+      <span>ПВЗ</span><span class="sep">→</span>
+      <span>Клиент</span><span class="sep">→</span>
+      <span>Финансы</span>
+    </div>
+  </div>
+  <div class="foot"><span>Роли проверяются на сервере</span><span></span></div>
+</section>
+
+<section class="slide dark" data-notes="Magi — не чат-бот. Два шага: сначала модель сама выбирает тип задачи из 17, потом получает узкий промпт и срез контекста. Если уверенность ниже порога — диалог уходит человеку с готовой AI-сводкой.">
+  <div class="kicker">Magi AI</div>
+  <div class="mid">
+    <h2>Magi знает заказ.<br>И честно говорит<br><span class="red-t">«не уверен».</span></h2>
+    <p class="sub">Ниже порога — человеку с готовой сводкой.</p>
+  </div>
+  <div class="foot"><span>17 задач · 2 шага · offline-резерв</span><span></span></div>
+</section>
+
+<section class="slide" data-notes="Инбокс обновляется в реальном времени по SSE: новое сообщение появляется без перезагрузки. SLA-таймер по теме, шаблоны, горячие клавиши, единое окно для сайта, Telegram, email и Instagram.">
+  <div class="kicker">Клиентский сервис</div>
+  <div class="mid">
+    <h2>Ответ —<br>за секунды.</h2>
+    <p class="sub">Без перезагрузки. Сайт, Telegram, email, Instagram — одно окно.</p>
+  </div>
+  <div class="foot"><span>Real-time · SLA · шаблоны</span><span></span></div>
+</section>
+
+<section class="slide dark" data-notes="Пульс показывает красную цифру, Magi собирает причину и заказы-основания, руководитель принимает решение с владельцем и сроком. Каждое действие — в журнале аудита. Прогноз нагрузки предупреждает о перегрузе цеха.">
+  <div class="kicker">Производство</div>
+  <div class="mid">
+    <h2>Красная цифра →<br><span class="red-t">решение.</span></h2>
+    <p class="sub">Причина, основания, владелец, срок — и след в журнале.</p>
+  </div>
+  <div class="foot"><span>Пульс · прогноз нагрузки · решения</span><span></span></div>
+</section>
+
+<section class="slide" data-notes="Встроенная бухгалтерия вместо 1С: неизменяемый журнал проводок и сторно, ОСВ, P&L и БДДС онлайн, импорт выписки Клиент-Банка с автосверкой, дебиторка и кредиторка, Magi Auditor ищет аномалии.">
+  <div class="kicker">Финансы</div>
+  <div class="mid">
+    <h2>Бухгалтерия<br>уже внутри.</h2>
+    <p class="sub">Проводки, ОСВ, P&amp;L, банк, аудит. Без 1С.</p>
+  </div>
+  <div class="foot"><span>Двойная запись · импорт банка</span><span></span></div>
+</section>
+
+<section class="slide red" data-notes="Один процентный пункт просрочки — это 4 000 заказов и около 120 000 BYN в год. Автоответы выросли с 68 до 82% на демо-прогоне. Окупаемость пилота — около шести месяцев. Это оценки на данных заказчика.">
+  <div class="kicker">Эффект</div>
+  <div class="mid">
+    <div class="giant">120 000<br><small>BYN в год</small></div>
+    <p class="sub">Экономия на 1 п.п. просрочки: 4 000 заказов × 30 BYN.</p>
+  </div>
+  <div class="foot"><span>Оценка на данных заказчика</span><span>Окупаемость ~6 мес</span></div>
+</section>
+
+<section class="slide dark" data-notes="Пилот на одной линии фотокниг: миграция из Битрикс24 в CSV/JSON, 30 дней, проверяемые KPI — SLA, автоответы, просрочка, скорость отчётов. Безопасность: роли на сервере, журнал аудита, маскирование персональных данных, локальное хранение.">
+  <div class="kicker">Пилот</div>
+  <div class="mid">
+    <h2>30 дней.<br>Одна линия.<br>KPI.</h2>
+    <div class="row">
+      <span class="chip">SLA</span>
+      <span class="chip">Автоответы</span>
+      <span class="chip">Просрочка</span>
+      <span class="chip">Отчёты</span>
+    </div>
+  </div>
+  <div class="foot"><span>Миграция из Битрикс24 · CSV/JSON</span><span></span></div>
+</section>
+
+<section class="slide" data-notes="Финал. Система уже работает на стенде: инбокс, Telegram-бот, производство, бухгалтерия. Просим 30 дней на одной линии, чтобы показать 1 п.п. просрочки на реальных данных.">
+  <div class="blob b-red corner-tr"></div>
+  <div class="blob b-green corner-bl"></div>
+  <div class="kicker">Финал</div>
+  <div class="mid">
+    <h2>Система уже<br>работает.</h2>
+    <p class="sub">Дайте 30 дней — покажем 1 п.п. на вашей линии.</p>
+  </div>
+  <div class="foot"><span>Magi · PicPac</span><span>Space Hackathon 2026</span></div>
+</section>
+
+</div>
+<div class="bar" id="bar"></div>
+<div class="hud">
+  <span class="timer" id="timer">3:00</span>
+</div>
+<div class="hint">← → · N заметки · F экран</div>
+<div class="progress-num" id="pnum">1 / 12</div>
+<div class="notes" id="notes"><b>Заметки спикера</b><span id="notes-text"></span></div>
+<script>
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const bar = document.getElementById('bar');
+  const pnum = document.getElementById('pnum');
+  const notes = document.getElementById('notes');
+  const notesText = document.getElementById('notes-text');
+  const timerEl = document.getElementById('timer');
+  let index = 0;
+  let timerId = null;
+  let left = 180;
+
+  function show(next) {
+    index = Math.max(0, Math.min(next, slides.length - 1));
+    slides.forEach((slide, i) => slide.classList.toggle('on', i === index));
+    bar.style.width = ((index + 1) / slides.length) * 100 + '%';
+    pnum.textContent = (index + 1) + ' / ' + slides.length;
+    notesText.textContent = slides[index].dataset.notes || '';
+    try { history.replaceState(null, '', '#' + (index + 1)); } catch (e) {}
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowRight' || event.key === ' ' || event.key === 'PageDown') {
+      event.preventDefault(); show(index + 1);
+    } else if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+      event.preventDefault(); show(index - 1);
+    } else if (event.key === 'Home') {
+      show(0);
+    } else if (event.key === 'End') {
+      show(slides.length - 1);
+    } else if (event.key === 'n' || event.key === 'N' || event.key === 'т' || event.key === 'Т') {
+      notes.classList.toggle('show');
+    } else if (event.key === 'f' || event.key === 'F' || event.key === 'а' || event.key === 'А') {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else document.documentElement.requestFullscreen?.();
+    } else if (event.key === 't' || event.key === 'T' || event.key === 'е' || event.key === 'Е') {
+      toggleTimer();
+    }
+  });
+
+  function toggleTimer() {
+    if (timerId) {
+      clearInterval(timerId);
+      timerId = null;
+      return;
+    }
+    timerEl.classList.add('show');
+    timerEl.textContent = fmt(left);
+    timerId = setInterval(() => {
+      left -= 1;
+      if (left <= 0) { left = 0; clearInterval(timerId); timerId = null; }
+      timerEl.textContent = fmt(left);
+      timerEl.classList.toggle('hot', left <= 30);
+    }, 1000);
+  }
+  function fmt(seconds) {
+    return Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+  }
+
+  const start = parseInt(location.hash.replace('#', ''), 10);
+  show(Number.isFinite(start) && start > 0 ? start - 1 : 0);
+  window.addEventListener('hashchange', () => {
+    const target = parseInt(location.hash.replace('#', ''), 10);
+    if (Number.isFinite(target) && target > 0) show(target - 1);
+  });
+</script>
+</body>
+</html>
