@@ -173,11 +173,14 @@ def local_reply(text: str, client: dict, orders: list[dict], kb: list[dict], thr
             topic=intent if intent == "complaint" else "other", rule_hits=hits,
         )
 
-    asks_order = any(word in normalized for word in ("мой заказ", "где заказ", "статус", "готов", "успеет", "успеваем", "когда будет", "придет"))
-    asks_delivery = any(word in normalized for word in ("доставка", "курьер", "самовывоз", "привез", "пункт выдачи", "забрать"))
-    asks_price = any(word in normalized for word in ("цена", "стоимость", "сколько стоит", "прайс", "почем"))
-    asks_payment = any(word in normalized for word in ("оплата", "оплатить", "картой", "предоплата", "рассрочк"))
-    asks_discount = any(word in normalized for word in ("скидка", "промокод", "дешевле", "акция"))
+    is_new_order_intent = any(w in normalized for w in ("заказать", "закажу", "сделать заказ", "оформить заказ", "хочу заказ", "новый заказ"))
+    asks_order = (not is_new_order_intent) and (
+        any(word in normalized for word in ("мой заказ", "где заказ", "статус", "готов", "успеет", "успеваем", "когда будет", "придет", "что с заказом", "по заказу", "номер заказа", "посылк")) or bool(re.search(r"#\d+", normalized))
+    )
+    asks_delivery = any(word in normalized for word in ("доставка", "курьер", "самовывоз", "привез", "пункт выдачи", "забрать", "пвз"))
+    asks_price = any(word in normalized for word in ("цена", "стоимость", "сколько стоит", "прайс", "почем", "расценк"))
+    asks_payment = any(word in normalized for word in ("оплата", "оплатить", "картой", "предоплата", "рассрочк", "счет", "счёт"))
+    asks_discount = any(word in normalized for word in ("скидк", "промокод", "дешевл", "акци"))
     asks_custom = any(word in normalized for word in ("индивидуальн", "макет", "нестандарт", "свадеб", "свой дизайн"))
 
     if asks_order:
@@ -189,7 +192,21 @@ def local_reply(text: str, client: dict, orders: list[dict], kb: list[dict], thr
                 intent=intent, confidence=0.4, handoff=True, handoff_reason="Тема вне автоответа (правило route)",
                 topic="order_status", rule_hits=hits,
             )
-        order = _last_order(orders)
+        target_id = None
+        order_num_match = re.search(r"(?:заказ[а-я]*\s*#?|#)(\d+)", normalized)
+        if order_num_match:
+            try:
+                target_id = int(order_num_match.group(1))
+            except ValueError:
+                target_id = None
+        order = None
+        if target_id and orders:
+            for o in orders:
+                if o.get("id") == target_id:
+                    order = o
+                    break
+        if not order:
+            order = _last_order(orders)
         if not order:
             return MagiResult(
                 reply=f"{name}, не вижу заказов на этот контакт. Уточните, пожалуйста, номер заказа — передам менеджеру, чтобы он проверил.",
@@ -255,6 +272,12 @@ def local_reply(text: str, client: dict, orders: list[dict], kb: list[dict], thr
             )
         match, confidence = _kb_match(normalized, kb)
         if match:
+            if confidence < threshold:
+                return MagiResult(
+                    reply=f"{name}, уточню этот вопрос у менеджера — он подключится в течение 15 минут.",
+                    intent=intent, confidence=confidence, handoff=True, handoff_reason="Уверенность ниже порога",
+                    topic=intent, rule_hits=hits,
+                )
             return MagiResult(reply=match["answer"], intent=intent, confidence=confidence, topic=intent, rule_hits=hits)
 
     if any(word in normalized for word in _THANKS):
@@ -313,11 +336,11 @@ def detect_topic(text: str, rules: dict[str, dict] | None = None) -> str:
             return "return"
         return "complaint"
     checks = [
-        ("order_status", ("мой заказ", "где заказ", "статус", "готов", "успеет", "успеваем", "когда будет", "придет", "пришл", "задерж")),
+        ("order_status", ("мой заказ", "где заказ", "статус", "готов", "успеет", "успеваем", "когда будет", "придет", "пришл", "задерж", "заказ", "заказом", "заказа", "посылк")),
         ("pickup", ("самовывоз", "пункт выдачи", "забрать", "пвз")),
         ("production", ("сколько дней", "срок производств", "когда изготов")),
         ("custom", ("индивидуальн", "макет", "нестандарт", "свадеб", "свой дизайн")),
-        ("discount", ("скидка", "промокод", "дешевле")),
+        ("discount", ("скидк", "промокод", "дешевл", "акци")),
         ("payment", ("оплата", "оплатить", "картой", "предоплата", "рассрочк")),
         ("delivery", ("доставка", "курьер", "привез")),
         ("docs", ("счет", "счёт", "договор", "реквизит", "закрывающ")),

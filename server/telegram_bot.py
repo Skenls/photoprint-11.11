@@ -91,14 +91,18 @@ async def ingest_telegram_message(tg_id: str, display_name: str, username: str |
     with get_db() as conn:
         client = _resolve_client(conn, tg_id, display_name, username)
         conversation = _open_conversation(conn, client)
-        if not conversation["magi_enabled"]:
-            return None
         now = iso(utcnow())
         conn.execute(
             "INSERT INTO messages (conversation_id, author, body, created_at) VALUES (?, 'lead', ?, ?)",
             (conversation["id"], text.strip(), now),
         )
         conn.execute("UPDATE conversations SET last_message_at = ? WHERE id = ?", (now, conversation["id"]))
+        if not conversation["magi_enabled"]:
+            conn.execute(
+                "UPDATE conversations SET status = 'waiting' WHERE id = ? AND status != 'closed'",
+                (conversation["id"],),
+            )
+            return None
         threshold, rules, enabled = _settings_and_rules(conn)
         if not enabled:
             return None
