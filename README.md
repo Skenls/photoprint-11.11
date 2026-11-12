@@ -78,7 +78,8 @@ cd web && npm install && npm run build && cd ..
 Telegram-бот (aiogram 3), интегрированный с той же CRM:
 
 ```bash
-# .env: MAGI_TELEGRAM_TOKEN=... (токен не хранится в репозитории)
+# .env в корне проекта: MAGI_TELEGRAM_TOKEN=... (токен не хранится в репозитории)
+# .env читается автоматически и веб-приложением, и ботом
 .venv/bin/python -m server.telegram_bot
 ```
 
