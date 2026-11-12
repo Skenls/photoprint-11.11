@@ -7,11 +7,13 @@ import pytest
 os.environ["MAGI_DB"] = str(Path(tempfile.mkdtemp()) / "test.db")
 os.environ["MAGI_SECRET"] = "test-secret"
 os.environ["MAGI_PASSWORD"] = "demo"
-os.environ.pop("MAGI_API_KEY", None)
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from server import db  # noqa: E402
+from server import db  # noqa: E402  (тут подтягивается .env)
+
+# Тесты всегда офлайн: внешние LLM-вызовы запрещены.
+os.environ.pop("MAGI_API_KEY", None)
 
 db.reset_db()
 
@@ -535,3 +537,93 @@ def test_telegram_matches_lead_created_by_handle():
         detail = client.get(f"/api/conversations/{conv_id}").json()
         bodies = [m["body"] for m in detail["messages"]]
         assert "Когда будет доставка?" in bodies  # сообщение попало в тот же диалог
+
+
+def test_offline_confidence_on_skenls_phrases():
+    """Фразы из реального диалога, где Magi «плыл» (conf 0.32) — теперь уверенные ответы."""
+    from server.magi import local_reply, rules_map_from_db
+
+    login("director@magi.by")
+    with db.get_db() as conn:
+        client = dict(conn.execute("SELECT * FROM clients WHERE name = 'Мария Ковалёва'").fetchone())
+        orders = [dict(r) for r in conn.execute(
+            "SELECT * FROM orders WHERE client_id = ? ORDER BY created_at DESC", (client["id"],)
+        )]
+        kb = [dict(r) for r in conn.execute("SELECT * FROM kb ORDER BY id")]
+        rules = rules_map_from_db(conn.execute("SELECT * FROM rules WHERE enabled = 1"))
+
+    confident = [
+        ("каково состояние моего последнего заказа", 0.8),
+        ("куда доставите заказ", 0.7),
+        ("пришли список моих заказов", 0.8),
+        ("меня зовут даниил", 0.8),
+        ("Сколько стоит холст 40×60?", 0.7),  # теперь отвечает прайсом холстов, не книг
+    ]
+    for text, min_conf in confident:
+        result = local_reply(text, client, orders, kb, 0.55, rules, "telegram")
+        assert result.confidence >= min_conf, (text, result.confidence, result.reply)
+        assert not result.handoff, (text, result.reply)
+
+    # чужой номер заказа → честная передача человеку, а не ответ про другой заказ
+    result = local_reply("что с моим заказом #999?", client, orders, kb, 0.55, rules, "telegram")
+    assert result.handoff and "999" in result.reply
+
+    # представился и сразу спросил — вопрос не теряется
+    result = local_reply("меня зовут Даниил, где мой заказ?", client, orders, kb, 0.55, rules, "telegram")
+    assert result.intent == "order_status" and not result.handoff
+
+    # имя с маленькой буквы тоже распознаётся
+    from server.magi import extract_name
+    assert extract_name("меня зовут даниил") == "Даниил"
+
+
+def test_openai_two_step_prompt_selection(monkeypatch):
+    """Шаг 1: LLM-классификатор выбирает задачу; шаг 2: система отдаёт промпт этой задачи."""
+    import asyncio
+
+    from server import magi
+
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": calls[-1]["content"]}}]}
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def post(self, url, headers=None, json=None):
+            calls.append(dict(json))
+            calls[-1]["content"] = (
+                '{"topic": "delivery"}' if len(calls) == 1
+                else '{"reply": "Доставляем за 1 день.", "confidence": 0.9, "handoff": false, "handoff_reason": null}'
+            )
+            return FakeResponse()
+
+    monkeypatch.setattr(magi.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("MAGI_API_KEY", "test-key")
+    try:
+        result = asyncio.run(magi.openai_reply("куда доставите заказ", {"name": "Тест"}, [], [], "telegram"))
+    finally:
+        monkeypatch.undo()
+
+    assert result is not None, "openai_reply должен вернуть результат"
+    assert result.topic == "delivery" and result.confidence == 0.9
+    # шаг 1 — короткий классификационный вызов с промптом классификатора
+    assert calls[0]["messages"][0]["content"] == magi.classifier_prompt()
+    assert calls[0]["max_tokens"] == 24
+    # шаг 2 — системный промпт именно выбранной задачи
+    assert calls[1]["messages"][0]["content"] == magi.task_prompt("delivery")
+
+    # без ключа модель недоступна → None, движок уходит в оффлайн-правила
+    assert asyncio.run(magi.classify_topic("привет")) is None
