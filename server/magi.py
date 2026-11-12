@@ -432,15 +432,18 @@ def detect_topic(text: str, rules: dict[str, dict] | None = None) -> str:
 
 
 def _chat_config() -> tuple[str, str, str] | None:
+    default_url = "https://api.openai.com/v1"
+    explicit_url = os.getenv("MAGI_BASE_URL", "").strip()
     key = os.getenv("MAGI_API_KEY", "").strip()
-    if not key:
+    # Локальные серверы (LM Studio, llama.cpp, Ollama) работают без ключа:
+    # если MAGI_BASE_URL задан явно, ключ не обязателен.
+    if not key and not explicit_url:
         return None
-    # MAGI_BASE_URL может быть задан и корнем (/v1), и полным путём (/v1/chat/completions).
-    base_url = os.getenv("MAGI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    base_url = (explicit_url or default_url).rstrip("/")
     if base_url.endswith("/chat/completions"):
         base_url = base_url[: -len("/chat/completions")]
     model = os.getenv("MAGI_MODEL", "gpt-4.1-mini")
-    return base_url, key, model
+    return base_url, key or "local", model
 
 
 async def _chat(messages: list[dict], *, temperature: float, max_tokens: int, timeout: float = 20) -> str | None:

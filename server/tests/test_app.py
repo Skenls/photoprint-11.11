@@ -12,8 +12,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from server import db  # noqa: E402  (тут подтягивается .env)
 
-# Тесты всегда офлайн: внешние LLM-вызовы запрещены.
+# Тесты всегда офлайн: внешние/локальные LLM-вызовы запрещены.
 os.environ.pop("MAGI_API_KEY", None)
+os.environ.pop("MAGI_BASE_URL", None)
 
 db.reset_db()
 

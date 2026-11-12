@@ -166,6 +166,8 @@ export MAGI_MODEL=gpt-4.1-mini
 ```
 
 Провайдер получает ответ и при ошибке Magi откатывается на локальный движок.
+Локальные серверы (LM Studio, llama.cpp, Ollama) работают без ключа: достаточно
+задать `MAGI_BASE_URL` на локальный адрес — ключ не обязателен.
 
 ### Динамические промпты (под маленькие LLM)
 
@@ -202,7 +204,8 @@ export MAGI_MODEL=gpt-4.1-mini
 | `MAGI_PASSWORD` | `demo` | пароль демо-ролей |
 | `MAGI_SECURE_COOKIE` | `0` | `1` для HTTPS |
 | `MAGI_CORS` | localhost:5173 | разрешённые origin для dev |
-| `MAGI_BASE_URL` / `MAGI_API_KEY` / `MAGI_MODEL` | пусто | OpenAI-совместимый провайдер Magi |
+| `MAGI_BASE_URL` / `MAGI_MODEL` | пусто | OpenAI-совместимый провайдер Magi (локальные серверы — без ключа) |
+| `MAGI_API_KEY` | пусто | ключ облака; для локального `MAGI_BASE_URL` не нужен |
 | `DEMO_MODE` | `1` | разрешает сброс демо |
 
 Шаблон — `.env.example`; файл окружения: `uvicorn ... --env-file .env`.
